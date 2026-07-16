@@ -88,13 +88,28 @@
 
   function renderHealth(data) {
     const items = data.items || [];
-    healthMetaEl.textContent = `最近检测时间 ${data.checked_at || "-"}`;
+    const pool = data.pool || {};
+    const poolBits = [];
+    if (pool.total != null) poolBits.push(`号池 ${pool.total}`);
+    const providers = pool.providers || {};
+    if (providers.grok_web != null) poolBits.push(`web ${providers.grok_web}`);
+    if (providers.grok_build != null) poolBits.push(`build ${providers.grok_build}`);
+    if (providers.grok_console != null) poolBits.push(`console ${providers.grok_console}`);
+    healthMetaEl.textContent = [
+      `最近检测时间 ${data.checked_at || "-"}`,
+      poolBits.length ? poolBits.join(" · ") : "",
+    ].filter(Boolean).join(" | ");
     if (!items.length) {
       healthGridEl.innerHTML = '<div class="empty">暂无健康检查结果</div>';
       return;
     }
-    healthGridEl.innerHTML = items.map((item) => `
-      <div class="health-card">
+    healthGridEl.innerHTML = items.map((item) => {
+      const isPool = item.key === "pool" || String(item.label || "").toLowerCase().includes("pool") || String(item.label || "").includes("号池");
+      const extra = isPool && pool.import_summary
+        ? `<div class="health-detail">import: ${escapeHtml(pool.import_summary)}</div>`
+        : "";
+      return `
+      <div class="health-card ${isPool ? "health-card-pool" : ""}">
         <div class="task-row">
           <strong>${escapeHtml(item.label)}</strong>
           <span class="${healthClass(item.ok)}">${item.ok ? "正常" : "异常"}</span>
@@ -102,8 +117,20 @@
         <div class="health-summary">${escapeHtml(item.summary || "-")}</div>
         <div class="health-target">${escapeHtml(item.target || "-")}</div>
         <div class="health-detail">${escapeHtml(item.detail || "-")}</div>
-      </div>
-    `).join("");
+        ${extra}
+      </div>`;
+    }).join("");
+  }
+
+  function progressPercents(task) {
+    const target = Math.max(1, Number(task.target_count || 1));
+    const success = Math.max(0, Number(task.completed_count || 0));
+    const failed = Math.max(0, Number(task.failed_count || 0));
+    const pushed = Math.max(0, Number(task.pushed_count || 0));
+    const successPct = Math.min(100, Math.round((success / target) * 100));
+    const failedPct = Math.min(100 - successPct, Math.round((failed / target) * 100));
+    const pushedPct = Math.min(100, Math.round((pushed / target) * 100));
+    return { successPct, failedPct, pushedPct, success, failed, pushed, target };
   }
 
   function renderTaskList() {
@@ -112,19 +139,26 @@
       return;
     }
 
-    taskListEl.innerHTML = state.tasks.map((task) => `
+    taskListEl.innerHTML = state.tasks.map((task) => {
+      const p = progressPercents(task);
+      return `
       <button class="task-card ${task.id === state.selectedTaskId ? "selected" : ""}" data-task-id="${task.id}">
         <div class="task-row">
           <strong title="${escapeHtml(task.name)}">#${task.id} ${escapeHtml(task.name)}</strong>
           <span class="${statusClass(task.status)}">${escapeHtml(task.status)}</span>
         </div>
-        <div class="task-subrow">目标 ${task.target_count} · 成功 ${task.completed_count || 0} · 入池 ${task.pushed_count || 0} · 失败 ${task.failed_count || 0}</div>
+        <div class="task-subrow">目标 ${p.target} · 成功 ${p.success} · 入池 ${p.pushed} · 失败 ${p.failed}</div>
+        <div class="progress-track" aria-hidden="true">
+          <span class="progress-success" style="width:${p.successPct}%"></span>
+          <span class="progress-failed" style="width:${p.failedPct}%"></span>
+        </div>
+        <div class="task-subrow task-progress-meta">进度 ${p.successPct}% · 入池 ${p.pushedPct}%</div>
         <div class="task-actions">
           <span class="task-action-hint">点击查看日志</span>
           <button class="button button-danger button-small" type="button" data-delete-task-id="${task.id}">删除</button>
         </div>
-      </button>
-    `).join("");
+      </button>`;
+    }).join("");
 
     taskListEl.querySelectorAll("[data-task-id]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -162,6 +196,7 @@
   function renderTaskDetail(task) {
     detailTitleEl.textContent = `任务 #${task.id} · ${task.name}`;
     stopBtnEl.disabled = !["queued", "running", "stopping"].includes(task.status);
+    const p = progressPercents(task);
     detailSummaryEl.innerHTML = [
       ["状态", task.status],
       ["目标次数", task.target_count],
@@ -169,6 +204,8 @@
       ["入池数", task.pushed_count || 0],
       ["新增/更新", `${task.pushed_created || 0}/${task.pushed_updated || 0}`],
       ["失败数", task.failed_count],
+      ["进度", `${p.successPct}%`],
+      ["入池进度", `${p.pushedPct}%`],
       ["当前轮次", task.current_round],
       ["当前阶段", task.current_phase || "-"],
     ].map(([label, value]) => `
@@ -176,7 +213,14 @@
         <div class="meta-item-label">${escapeHtml(label)}</div>
         <div class="meta-item-value">${escapeHtml(value)}</div>
       </div>
-    `).join("");
+    `).join("") + `
+      <div class="summary-item summary-progress full">
+        <div class="meta-item-label">完成进度</div>
+        <div class="progress-track progress-track-lg" aria-hidden="true">
+          <span class="progress-success" style="width:${p.successPct}%"></span>
+          <span class="progress-failed" style="width:${p.failedPct}%"></span>
+        </div>
+      </div>`;
 
     const cfg = task.config || {};
     detailMetaEl.innerHTML = [
