@@ -252,6 +252,11 @@
         sessionStorage.setItem("console_auth_token", fromQuery);
         return fromQuery;
       }
+      const fromPage = String(window.__PAGE_TOKEN__ || "").trim();
+      if (fromPage) {
+        sessionStorage.setItem("console_auth_token", fromPage);
+        return fromPage;
+      }
       return (sessionStorage.getItem("console_auth_token") || "").trim();
     } catch (error) {
       return "";

@@ -69,21 +69,40 @@ def console_auth_enabled() -> bool:
     return bool(CONSOLE_AUTH_TOKEN or (CONSOLE_BASIC_USER and CONSOLE_BASIC_PASSWORD))
 
 
-def require_console_auth(request: Request) -> None:
-    """Optional console gate: bearer token and/or basic auth from env."""
-    if not console_auth_enabled():
-        return
+AUTH_COOKIE_NAME = "grok_register_console_token"
 
+
+def _extract_console_token(request: Request) -> str:
     auth = (request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    q = (request.query_params.get("token") or "").strip()
+    if q:
+        return q
+    cookie = (request.cookies.get(AUTH_COOKIE_NAME) or "").strip()
+    if cookie:
+        return cookie
+    return ""
+
+
+def require_console_auth(request: Request) -> str | None:
+    """Optional console gate: bearer / query / cookie token and/or basic auth.
+
+    Returns the accepted token when token-auth succeeds so middleware can set cookie.
+    """
+    if not console_auth_enabled():
+        return None
+
     if CONSOLE_AUTH_TOKEN:
-        if auth.lower().startswith("bearer ") and auth[7:].strip() == CONSOLE_AUTH_TOKEN:
-            return
-        # Allow query token for quick browser use when only token auth is configured.
-        q = (request.query_params.get("token") or "").strip()
-        if q and q == CONSOLE_AUTH_TOKEN:
-            return
+        token = _extract_console_token(request)
+        if token and token == CONSOLE_AUTH_TOKEN:
+            # Remember how it was provided so browser static assets can reuse cookie.
+            if (request.query_params.get("token") or "").strip() == CONSOLE_AUTH_TOKEN:
+                request.state.console_set_auth_cookie = True
+            return token
 
     if CONSOLE_BASIC_USER and CONSOLE_BASIC_PASSWORD:
+        auth = (request.headers.get("authorization") or "").strip()
         if auth.lower().startswith("basic "):
             import base64
 
@@ -91,7 +110,7 @@ def require_console_auth(request: Request) -> None:
                 raw = base64.b64decode(auth[6:].strip()).decode("utf-8", errors="ignore")
                 user, _, password = raw.partition(":")
                 if user == CONSOLE_BASIC_USER and password == CONSOLE_BASIC_PASSWORD:
-                    return
+                    return None
             except Exception:
                 pass
 
@@ -1242,16 +1261,55 @@ app = FastAPI(title="Grok Register Console", lifespan=lifespan, root_path=ROOT_P
 @app.middleware("http")
 async def console_auth_middleware(request: Request, call_next):
     try:
-        require_console_auth(request)
+        accepted_token = require_console_auth(request)
     except HTTPException as exc:
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import JSONResponse, HTMLResponse
 
+        # Browser HTML visits get a tiny unlock page instead of bare JSON 401.
+        accept = (request.headers.get("accept") or "").lower()
+        wants_html = "text/html" in accept and "application/json" not in accept
+        if wants_html and request.method == "GET":
+            body = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Register Console Auth</title>
+<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 16px;line-height:1.6}
+input,button{font:inherit;padding:10px 12px;border-radius:10px;border:1px solid #ccc}
+button{background:#222;color:#fff;border:0;cursor:pointer}</style></head>
+<body>
+  <h1>控制台需要鉴权</h1>
+  <p>当前开启了访问保护。请输入访问 token，或用 <code>?token=你的token</code> 打开。</p>
+  <form id="f"><input id="t" name="token" placeholder="console auth token" style="width:100%;margin:8px 0" required>
+  <button type="submit">进入控制台</button></form>
+  <script>
+    document.getElementById('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var token = document.getElementById('t').value.trim();
+      if (!token) return;
+      var url = new URL(window.location.href);
+      url.searchParams.set('token', token);
+      window.location.href = url.toString();
+    });
+  </script>
+</body></html>"""
+            return HTMLResponse(status_code=401, content=body, headers=getattr(exc, "headers", None) or {})
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail},
             headers=getattr(exc, "headers", None) or {},
         )
-    return await call_next(request)
+
+    response = await call_next(request)
+    # Persist token for subsequent static/API requests after ?token= unlock.
+    # Always use path="/" so both direct :18600 and nginx /register work.
+    if getattr(request.state, "console_set_auth_cookie", False) and accepted_token:
+        response.set_cookie(
+            key=AUTH_COOKIE_NAME,
+            value=accepted_token,
+            httponly=True,
+            samesite="lax",
+            path="/",
+            max_age=60 * 60 * 24 * 30,
+        )
+    return response
 
 STATIC_DIR = APP_DIR / "static"
 
@@ -1267,6 +1325,11 @@ def static_asset(asset_path: str) -> FileResponse:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
+    page_token = ""
+    if CONSOLE_AUTH_TOKEN:
+        candidate = _extract_console_token(request)
+        if candidate == CONSOLE_AUTH_TOKEN:
+            page_token = candidate
     return TEMPLATES.TemplateResponse(
         request,
         "index.html",
@@ -1277,6 +1340,7 @@ def index(request: Request) -> HTMLResponse:
             "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,
             "source_project": str(SOURCE_PROJECT),
             "base_path": ROOT_PATH,
+            "page_token": page_token,
         },
     )
 
