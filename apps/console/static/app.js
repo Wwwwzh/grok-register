@@ -14,6 +14,12 @@
     templates: [],
     lastHealth: null,
     lastPoolTrend: null,
+    sseConnected: false,
+    sseSource: null,
+    sseRetryMs: 2000,
+    pollTimer: null,
+    healthActiveTimer: null,
+    healthIdleTimer: null,
     lastLogLines: [],
     autoScroll: true,
     refreshingTasks: false,
@@ -776,6 +782,135 @@
     }
   }
 
+
+  function authTokenQuery() {
+    const token = getAuthToken();
+    return token ? `token=${encodeURIComponent(token)}` : "";
+  }
+
+  function scheduleTaskRefresh(reason) {
+    if (state._taskRefreshTimer) return;
+    state._taskRefreshTimer = window.setTimeout(async () => {
+      state._taskRefreshTimer = null;
+      try {
+        await refreshTasks();
+        await refreshDetail();
+      } catch (error) {
+        // Keep quiet on background SSE-driven refresh failures.
+      }
+    }, reason === "progress" ? 250 : 80);
+  }
+
+  function handleSsePayload(payload) {
+    if (!payload || typeof payload !== "object") return;
+    const eventName = payload.event || "message";
+    if (eventName === "ping" || eventName === "hello") return;
+    if (eventName === "tasks_changed" || eventName === "task_created" || eventName === "task_deleted" || eventName === "task_started" || eventName === "task_finished" || eventName === "task_stopping") {
+      scheduleTaskRefresh(eventName);
+      return;
+    }
+    if (eventName === "task_progress") {
+      const data = payload.data || {};
+      const taskId = Number(data.task_id || 0);
+      // Soft-update selected task progress without waiting for full poll.
+      if (taskId && state.selectedTaskId === taskId) {
+        scheduleTaskRefresh("progress");
+      } else {
+        scheduleTaskRefresh("progress");
+      }
+    }
+  }
+
+  function stopSse() {
+    if (state.sseSource) {
+      try { state.sseSource.close(); } catch (error) {}
+      state.sseSource = null;
+    }
+    state.sseConnected = false;
+  }
+
+  function connectSse() {
+    if (!window.EventSource) {
+      state.sseConnected = false;
+      return false;
+    }
+    stopSse();
+    const qs = authTokenQuery();
+    const taskQ = state.selectedTaskId ? `task_id=${encodeURIComponent(state.selectedTaskId)}` : "";
+    const parts = [qs, taskQ].filter(Boolean).join("&");
+    const url = apiUrl(`/api/events${parts ? `?${parts}` : ""}`);
+    let es;
+    try {
+      es = new EventSource(url);
+    } catch (error) {
+      state.sseConnected = false;
+      return false;
+    }
+    state.sseSource = es;
+
+    const onAny = (event) => {
+      try {
+        const payload = JSON.parse(event.data || "{}");
+        // Some events wrap {event,data}, hello/ping do too.
+        handleSsePayload(payload.event ? payload : { event: event.type || "message", data: payload });
+      } catch (error) {}
+    };
+
+    ["hello", "ping", "tasks_changed", "task_created", "task_deleted", "task_started", "task_finished", "task_stopping", "task_progress", "message"].forEach((name) => {
+      es.addEventListener(name, onAny);
+    });
+
+    es.onopen = () => {
+      state.sseConnected = true;
+      state.sseRetryMs = 2000;
+      // When live stream is healthy, slow polling down.
+      restartPolling();
+    };
+    es.onerror = () => {
+      state.sseConnected = false;
+      try { es.close(); } catch (error) {}
+      state.sseSource = null;
+      restartPolling();
+      window.setTimeout(() => {
+        connectSse();
+      }, state.sseRetryMs);
+      state.sseRetryMs = Math.min(15000, Math.floor(state.sseRetryMs * 1.5));
+    };
+    return true;
+  }
+
+  function clearPolling() {
+    if (state.pollTimer) {
+      window.clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+    if (state.healthActiveTimer) {
+      window.clearInterval(state.healthActiveTimer);
+      state.healthActiveTimer = null;
+    }
+    if (state.healthIdleTimer) {
+      window.clearInterval(state.healthIdleTimer);
+      state.healthIdleTimer = null;
+    }
+  }
+
+  function restartPolling() {
+    clearPolling();
+    // SSE healthy: light fallback poll. SSE down: original cadence.
+    const taskMs = state.sseConnected ? 15000 : 3000;
+    const healthActiveMs = state.sseConnected ? 60000 : 30000;
+    const healthIdleMs = state.sseConnected ? 120000 : 60000;
+    state.pollTimer = window.setInterval(() => {
+      refreshAll();
+    }, taskMs);
+    state.healthActiveTimer = window.setInterval(() => {
+      if (hasActiveTasks()) refreshHealth();
+    }, healthActiveMs);
+    state.healthIdleTimer = window.setInterval(() => {
+      if (!hasActiveTasks()) refreshHealth();
+    }, healthIdleMs);
+  }
+
   async function refreshAll() {
     try {
       await refreshTasks();
@@ -1172,19 +1307,6 @@
   });
   refreshHealth();
   refreshAll();
-
-  // Adaptive polling: task list every 3s; health 30s when active, 60s when idle.
-  window.setInterval(() => {
-    refreshAll();
-  }, 3000);
-  window.setInterval(() => {
-    if (hasActiveTasks()) {
-      refreshHealth();
-    }
-  }, 30000);
-  window.setInterval(() => {
-    if (!hasActiveTasks()) {
-      refreshHealth();
-    }
-  }, 60000);
+  connectSse();
+  restartPolling();
 })();

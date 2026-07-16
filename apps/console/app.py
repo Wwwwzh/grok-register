@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import signal
 import sqlite3
 import subprocess
 import threading
+from queue import Empty, Queue
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -18,7 +20,7 @@ from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -1392,6 +1394,11 @@ class TaskSupervisor:
             (STATUS_STOPPING, "Stopping task...", STATUS_STOPPING, task_id),
         )
         try:
+            sse_hub.publish("task_stopping", {"task_id": task_id, "status": STATUS_STOPPING})
+            sse_hub.publish("tasks_changed", {"reason": "stopping", "task_id": task_id})
+        except Exception:
+            pass
+        try:
             os.killpg(managed.process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
@@ -1473,6 +1480,11 @@ class TaskSupervisor:
             """,
             (STATUS_RUNNING, process.pid, now_iso(), "process_started", now_iso(), task_id),
         )
+        try:
+            sse_hub.publish("task_started", {"task_id": task_id, "status": STATUS_RUNNING})
+            sse_hub.publish("tasks_changed", {"reason": "started", "task_id": task_id})
+        except Exception:
+            pass
 
     def _refresh_running(self) -> None:
         finished: list[int] = []
@@ -1498,6 +1510,21 @@ class TaskSupervisor:
                     task_id,
                 ),
             )
+            try:
+                sse_hub.publish(
+                    "task_progress",
+                    {
+                        "task_id": task_id,
+                        "status": row["status"],
+                        "completed_count": parsed["completed_count"],
+                        "failed_count": parsed["failed_count"],
+                        "current_round": parsed["current_round"],
+                        "current_phase": parsed["current_phase"],
+                        "last_error": parsed["last_error"],
+                    },
+                )
+            except Exception:
+                pass
             exit_code = managed.process.poll()
             if exit_code is None:
                 continue
@@ -1531,10 +1558,71 @@ class TaskSupervisor:
                 ),
             )
             finished.append(task_id)
+            try:
+                sse_hub.publish(
+                    "task_finished",
+                    {
+                        "task_id": task_id,
+                        "status": final_status,
+                        "exit_code": exit_code,
+                        "completed_count": parsed["completed_count"],
+                        "failed_count": parsed["failed_count"],
+                    },
+                )
+                sse_hub.publish("tasks_changed", {"reason": "finished", "task_id": task_id, "status": final_status})
+            except Exception:
+                pass
         for task_id in finished:
             managed = self._processes.pop(task_id, None)
             if managed and managed.log_handle:
                 managed.log_handle.close()
+
+
+
+class SseHub:
+    """Tiny in-process fan-out for console live updates."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: list[Queue] = []
+
+    def subscribe(self) -> Queue:
+        q: Queue = Queue(maxsize=200)
+        with self._lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: Queue) -> None:
+        with self._lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
+    def publish(self, event: str, data: dict[str, Any] | None = None) -> None:
+        payload = {
+            "event": event,
+            "ts": now_iso(),
+            "data": data or {},
+        }
+        dead: list[Queue] = []
+        with self._lock:
+            subs = list(self._subscribers)
+        for q in subs:
+            try:
+                q.put_nowait(payload)
+            except Exception:
+                # Drop oldest then retry once; if still full, mark dead.
+                try:
+                    _ = q.get_nowait()
+                    q.put_nowait(payload)
+                except Exception:
+                    dead.append(q)
+        for q in dead:
+            self.unsubscribe(q)
+
+
+sse_hub = SseHub()
 
 
 supervisor = TaskSupervisor()
@@ -1672,6 +1760,67 @@ def api_pool_trend(limit: int = 72) -> dict[str, Any]:
     return {"ok": True, **trend}
 
 
+@app.get("/api/events")
+async def api_events(request: Request, task_id: int | None = Query(default=None)):
+    """Server-Sent Events stream for live console updates.
+
+    Auth: same as other APIs (Authorization / query token / cookie).
+    Optional task_id filters task_progress/log-ish events to one task, while
+    still forwarding global tasks_changed events.
+    """
+    queue = sse_hub.subscribe()
+
+    async def event_stream():
+        # Hello + bootstrap snapshot so clients can reconcile immediately.
+        hello = {
+            "event": "hello",
+            "ts": now_iso(),
+            "data": {
+                "task_id": task_id,
+                "active_tasks": sum(
+                    1
+                    for row in fetch_all("SELECT status FROM tasks")
+                    if row["status"] in ACTIVE_TASK_STATUSES
+                ),
+            },
+        }
+        yield f"event: hello\ndata: {json.dumps(hello, ensure_ascii=False)}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.to_thread(queue.get, True, 15.0)
+                except Empty:
+                    # keepalive comment + ping event
+                    yield f": keepalive {now_iso()}\n\n"
+                    ping = {"event": "ping", "ts": now_iso(), "data": {}}
+                    yield f"event: ping\ndata: {json.dumps(ping, ensure_ascii=False)}\n\n"
+                    continue
+                except Exception:
+                    break
+
+                event_name = str(payload.get("event") or "message")
+                data = payload.get("data") or {}
+                if task_id is not None and event_name in {"task_progress", "task_started", "task_finished", "task_stopping"}:
+                    if int(data.get("task_id") or -1) != int(task_id):
+                        # still useful to know list changed
+                        if event_name == "task_finished":
+                            pass
+                        else:
+                            continue
+                yield f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        finally:
+            sse_hub.unsubscribe(queue)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+
+
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
     settings = read_settings()
@@ -1797,6 +1946,11 @@ def create_task(payload: TaskCreate) -> dict[str, Any]:
         "UPDATE tasks SET task_dir = ?, console_path = ? WHERE id = ?",
         (str(task_dir), str(console_path), task_id),
     )
+    try:
+        sse_hub.publish("task_created", {"task_id": task_id, "status": STATUS_QUEUED})
+        sse_hub.publish("tasks_changed", {"reason": "created", "task_id": task_id})
+    except Exception:
+        pass
     return {"task": serialize_task(task_row(task_id))}
 
 
@@ -1828,6 +1982,11 @@ def delete_task(task_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="Task is still active")
     delete_task_files(row)
     execute_no_return("DELETE FROM tasks WHERE id = ?", (task_id,))
+    try:
+        sse_hub.publish("task_deleted", {"task_id": task_id})
+        sse_hub.publish("tasks_changed", {"reason": "deleted", "task_id": task_id})
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -1866,6 +2025,14 @@ def cleanup_tasks(payload: TaskCleanupRequest) -> dict[str, Any]:
         delete_task_files(row)
         execute_no_return("DELETE FROM tasks WHERE id = ?", (task_id,))
         deleted_ids.append(task_id)
+    if deleted_ids:
+        try:
+            sse_hub.publish(
+                "tasks_changed",
+                {"reason": "cleanup", "deleted_ids": deleted_ids, "deleted_count": len(deleted_ids)},
+            )
+        except Exception:
+            pass
     return {
         "ok": True,
         "deleted_count": len(deleted_ids),
