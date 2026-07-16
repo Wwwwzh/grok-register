@@ -225,9 +225,11 @@
               </label>
             </div>
             <div class="form-actions full">
+              <button id="preflightBtn" class="button button-secondary" type="button">创建前预检</button>
               <button class="button" type="submit">创建任务</button>
               <div id="formMessage" class="form-message"></div>
             </div>
+            <div id="preflightBox" class="preflight-box full hidden"></div>
           </form>
         </section>
 
@@ -260,7 +262,15 @@
               <button type="button" class="chip" data-filter="done">已完成</button>
               <button type="button" class="chip" data-filter="failed">失败/部分</button>
             </div>
-            <div id="taskListMeta" class="task-list-meta">0 个任务</div>
+            <div class="task-tools">
+              <input id="taskSearchInput" class="task-search" type="search" placeholder="搜索 ID / 名称" autocomplete="off">
+              <div class="cleanup-group">
+                <button id="cleanupDoneBtn" class="button button-secondary button-small" type="button">清理已完成</button>
+                <button id="cleanupFailedBtn" class="button button-secondary button-small" type="button">清理失败/部分</button>
+                <button id="cleanupAllTerminalBtn" class="button button-danger button-small" type="button">清理全部终态</button>
+              </div>
+              <div id="taskListMeta" class="task-list-meta">0 个任务</div>
+            </div>
           </div>
           <div id="taskList" class="task-list"></div>
         </section>
@@ -281,8 +291,17 @@
           <div id="detailMeta" class="detail-grid hidden"></div>
           <div class="console-wrap">
             <div class="console-head">
-              <span>实时控制台日志</span>
-              <span id="consoleMeta" class="console-meta">选择任务后显示输出</span>
+              <div class="console-head-left">
+                <span>实时控制台日志</span>
+                <span id="consoleMeta" class="console-meta">选择任务后显示输出</span>
+              </div>
+              <div class="console-head-actions">
+                <label class="console-toggle">
+                  <input id="autoScrollToggle" type="checkbox" checked>
+                  <span>自动滚动</span>
+                </label>
+                <button id="downloadLogBtn" class="button button-secondary button-small" type="button" disabled>下载日志</button>
+              </div>
             </div>
             <pre id="consoleOutput" class="console-output">选择任务后显示输出</pre>
           </div>

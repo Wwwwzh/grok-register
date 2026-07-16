@@ -718,6 +718,40 @@ class SystemSettings(BaseModel):
     )
 
 
+class TaskCleanupRequest(BaseModel):
+    statuses: list[str] = Field(
+        default_factory=lambda: [
+            STATUS_COMPLETED,
+            STATUS_STOPPED,
+            STATUS_FAILED,
+            STATUS_PARTIAL,
+        ]
+    )
+
+
+class PreflightRequest(BaseModel):
+    # Optional overrides; empty means use system defaults.
+    proxy: str | None = None
+    browser_proxy: str | None = None
+    temp_mail_api_base: str | None = None
+    temp_mail_admin_password: str | None = None
+    temp_mail_domain: str | None = None
+    temp_mail_site_password: str | None = None
+    api_endpoint: str | None = None
+    api_import_endpoint: str | None = None
+    api_admin_username: str | None = None
+    api_admin_password: str | None = None
+
+
+ACTIVE_TASK_STATUSES = {STATUS_QUEUED, STATUS_RUNNING, STATUS_STOPPING}
+TERMINAL_CLEANUP_STATUSES = {
+    STATUS_COMPLETED,
+    STATUS_STOPPED,
+    STATUS_FAILED,
+    STATUS_PARTIAL,
+}
+
+
 @dataclass
 class ManagedProcess:
     task_id: int
@@ -916,17 +950,28 @@ def serialize_task(row: sqlite3.Row) -> dict[str, Any]:
             "pushed_updated": int(parsed.get("pushed_updated") or 0),
             "push_events": int(parsed.get("push_events") or 0),
         }
+    completed = int(row["completed_count"])
+    failed = int(row["failed_count"])
+    pushed = int(push.get("pushed_count") or 0)
+    push_gap = max(0, completed - pushed)
+    last_error = row["last_error"] or ""
+    error_summary = " ".join(str(last_error).split())
+    if len(error_summary) > 120:
+        error_summary = error_summary[:117] + "..."
     return {
         "id": int(row["id"]),
         "name": row["name"],
         "status": row["status"],
         "target_count": int(row["target_count"]),
-        "completed_count": int(row["completed_count"]),
-        "failed_count": int(row["failed_count"]),
+        "completed_count": completed,
+        "failed_count": failed,
         "current_round": int(row["current_round"]),
         "current_phase": row["current_phase"] or "",
         "last_email": row["last_email"] or "",
-        "last_error": row["last_error"] or "",
+        "last_error": last_error,
+        "error_summary": error_summary,
+        "push_gap": push_gap,
+        "has_push_gap": push_gap > 0,
         "last_log_at": row["last_log_at"] or "",
         "notes": row["notes"] or "",
         "config": json.loads(row["config_json"]),
@@ -1468,9 +1513,267 @@ def delete_task(task_id: int) -> dict[str, Any]:
     managed = supervisor._processes.get(task_id)
     if managed and managed.process.poll() is None:
         raise HTTPException(status_code=409, detail="Task is still running")
+    if row["status"] in ACTIVE_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="Task is still active")
     delete_task_files(row)
     execute_no_return("DELETE FROM tasks WHERE id = ?", (task_id,))
     return {"ok": True}
+
+
+@app.post("/api/tasks/cleanup")
+def cleanup_tasks(payload: TaskCleanupRequest) -> dict[str, Any]:
+    statuses = []
+    for status in payload.statuses or []:
+        value = str(status or "").strip().lower()
+        if not value:
+            continue
+        if value in ACTIVE_TASK_STATUSES:
+            raise HTTPException(status_code=400, detail=f"Cannot cleanup active status: {value}")
+        if value not in TERMINAL_CLEANUP_STATUSES:
+            raise HTTPException(status_code=400, detail=f"Unsupported cleanup status: {value}")
+        if value not in statuses:
+            statuses.append(value)
+    if not statuses:
+        raise HTTPException(status_code=400, detail="statuses is required")
+
+    placeholders = ", ".join("?" for _ in statuses)
+    rows = fetch_all(
+        f"SELECT * FROM tasks WHERE status IN ({placeholders}) ORDER BY id DESC",
+        tuple(statuses),
+    )
+    deleted_ids: list[int] = []
+    skipped_ids: list[int] = []
+    for row in rows:
+        task_id = int(row["id"])
+        managed = supervisor._processes.get(task_id)
+        if managed and managed.process.poll() is None:
+            skipped_ids.append(task_id)
+            continue
+        if row["status"] in ACTIVE_TASK_STATUSES:
+            skipped_ids.append(task_id)
+            continue
+        delete_task_files(row)
+        execute_no_return("DELETE FROM tasks WHERE id = ?", (task_id,))
+        deleted_ids.append(task_id)
+    return {
+        "ok": True,
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "skipped_ids": skipped_ids,
+        "statuses": statuses,
+    }
+
+
+def run_preflight(payload: PreflightRequest | None = None) -> dict[str, Any]:
+    """Lightweight create-time checks using current defaults with optional overrides."""
+    defaults = merged_defaults()
+    payload = payload or PreflightRequest()
+    overrides = payload.model_dump(exclude_none=True)
+
+    def pick(key: str, nested_api_key: str | None = None) -> str:
+        if key in overrides and overrides[key] is not None and str(overrides[key]).strip() != "":
+            return str(overrides[key]).strip()
+        if nested_api_key:
+            return str((defaults.get("api") or {}).get(nested_api_key) or "").strip()
+        return str(defaults.get(key) or "").strip()
+
+    browser_proxy = pick("browser_proxy")
+    request_proxy = pick("proxy")
+    temp_mail_api_base = pick("temp_mail_api_base")
+    temp_mail_admin_password = pick("temp_mail_admin_password")
+    temp_mail_domain = pick("temp_mail_domain")
+    api_endpoint = pick("api_endpoint", "endpoint")
+    api_import_endpoint = pick("api_import_endpoint", "import_endpoint")
+    api_admin_username = pick("api_admin_username", "admin_username") or "admin"
+    api_admin_password = pick("api_admin_password", "admin_password")
+
+    # Build a temporary defaults-like object for pool helper reuse.
+    temp_defaults = {
+        **defaults,
+        "proxy": request_proxy,
+        "browser_proxy": browser_proxy,
+        "temp_mail_api_base": temp_mail_api_base,
+        "temp_mail_admin_password": temp_mail_admin_password,
+        "temp_mail_domain": temp_mail_domain,
+        "api": {
+            **dict(defaults.get("api") or {}),
+            "endpoint": api_endpoint,
+            "import_endpoint": api_import_endpoint,
+            "admin_username": api_admin_username,
+            "admin_password": api_admin_password,
+        },
+    }
+
+    items: list[dict[str, Any]] = []
+
+    # Browser proxy / WARP-ish reachability via existing health style.
+    if browser_proxy:
+        try:
+            # Treat configured browser proxy as present; deeper probe is expensive.
+            items.append(
+                _build_health_item(
+                    "browser_proxy",
+                    "浏览器代理",
+                    True,
+                    "已配置",
+                    _mask_proxy(browser_proxy),
+                    browser_proxy,
+                )
+            )
+        except Exception as exc:
+            items.append(
+                _build_health_item(
+                    "browser_proxy",
+                    "浏览器代理",
+                    False,
+                    "配置异常",
+                    str(exc),
+                    browser_proxy or "-",
+                )
+            )
+    else:
+        items.append(
+            _build_health_item(
+                "browser_proxy",
+                "浏览器代理",
+                False,
+                "未配置",
+                "创建任务前建议配置 browser_proxy",
+                "-",
+            )
+        )
+
+    # Temp mail
+    if not temp_mail_api_base:
+        items.append(
+            _build_health_item(
+                "temp_mail",
+                "临时邮箱",
+                False,
+                "未配置 API Base",
+                "缺少 temp_mail_api_base",
+                "-",
+            )
+        )
+    else:
+        try:
+            probe_url = temp_mail_api_base.rstrip("/") + "/"
+            resp = _request_with_optional_proxy(probe_url, proxy_url=request_proxy, method="GET", timeout=12)
+            # 2xx/3xx = good; 401/403 often means endpoint reachable but auth/domain issue.
+            ok = 200 <= resp.status_code < 400
+            summary = f"HTTP {resp.status_code}"
+            if resp.status_code in {401, 403}:
+                summary = f"HTTP {resp.status_code}（可达但鉴权/权限异常）"
+            items.append(
+                _build_health_item(
+                    "temp_mail",
+                    "临时邮箱",
+                    ok,
+                    summary,
+                    f"domain={temp_mail_domain or '-'} admin={'set' if temp_mail_admin_password else 'empty'}",
+                    temp_mail_api_base,
+                )
+            )
+        except Exception as exc:
+            items.append(
+                _build_health_item(
+                    "temp_mail",
+                    "临时邮箱",
+                    False,
+                    "不可达",
+                    str(exc),
+                    temp_mail_api_base,
+                )
+            )
+
+    # Admin login + import via pool helper
+    pool = _fetch_grok2api_pool_stats(temp_defaults)
+    items.append(
+        _build_health_item(
+            "grok2api",
+            "Admin Login / 号池",
+            bool(pool.get("ok")),
+            str(pool.get("summary") or "-"),
+            str(pool.get("detail") or "-"),
+            str(pool.get("target") or api_endpoint or "-"),
+        )
+    )
+    import_ok = bool(pool.get("import_ok")) if "import_ok" in pool else bool(api_import_endpoint)
+    import_summary = str(pool.get("import_summary") or ("未配置 import" if not api_import_endpoint else "未知"))
+    items.append(
+        _build_health_item(
+            "import",
+            "Import 入池",
+            bool(api_import_endpoint) and (import_ok or bool(pool.get("ok"))),
+            import_summary if api_import_endpoint else "未配置",
+            "注册成功后 SSO 会推送到此接口",
+            api_import_endpoint or "-",
+        )
+    )
+
+    # x.ai quick check (optional soft signal)
+    try:
+        xai_resp = _request_with_optional_proxy(
+            "https://accounts.x.ai/",
+            proxy_url=browser_proxy or request_proxy,
+            method="GET",
+            timeout=12,
+        )
+        items.append(
+            _build_health_item(
+                "xai",
+                "x.ai",
+                xai_resp.status_code < 500,
+                f"HTTP {xai_resp.status_code}",
+                "注册页连通性探测",
+                "https://accounts.x.ai/",
+            )
+        )
+    except Exception as exc:
+        items.append(
+            _build_health_item(
+                "xai",
+                "x.ai",
+                False,
+                "不可达",
+                str(exc),
+                "https://accounts.x.ai/",
+            )
+        )
+
+    ok = all(bool(item.get("ok")) for item in items)
+    return {
+        "ok": ok,
+        "checked_at": now_iso(),
+        "items": items,
+        "pool": {
+            "total": pool.get("total", 0),
+            "providers": pool.get("providers") or {},
+            "import_ok": pool.get("import_ok"),
+            "import_summary": pool.get("import_summary"),
+        },
+        "blocking": [item for item in items if not item.get("ok")],
+    }
+
+
+@app.post("/api/preflight")
+def api_preflight(payload: PreflightRequest | None = None) -> dict[str, Any]:
+    return run_preflight(payload)
+
+
+@app.get("/api/tasks/{task_id}/logs/download")
+def download_task_logs(task_id: int, limit: int = Query(5000, ge=100, le=20000)) -> dict[str, Any]:
+    row = task_row(task_id)
+    console_path = Path(row["console_path"])
+    lines = read_log_lines(console_path, limit=limit)
+    filename = f"task-{task_id}-{(row['name'] or 'task').replace('/', '_')}.log"
+    return {
+        "filename": filename,
+        "lines": lines,
+        "count": len(lines),
+        "task_id": task_id,
+        "task_name": row["name"],
+    }
 
 
 if __name__ == "__main__":

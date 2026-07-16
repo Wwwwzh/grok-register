@@ -10,7 +10,10 @@
     tasks: [],
     selectedTaskId: null,
     taskFilter: "all",
+    taskSearch: "",
     lastHealth: null,
+    lastLogLines: [],
+    autoScroll: true,
     refreshingTasks: false,
     refreshingDetail: false,
     refreshingHealth: false,
@@ -44,6 +47,14 @@
   const overviewPoolHintEl = document.getElementById("overviewPoolHint");
   const overviewHealthEl = document.getElementById("overviewHealth");
   const overviewHealthHintEl = document.getElementById("overviewHealthHint");
+  const taskSearchInputEl = document.getElementById("taskSearchInput");
+  const cleanupDoneBtnEl = document.getElementById("cleanupDoneBtn");
+  const cleanupFailedBtnEl = document.getElementById("cleanupFailedBtn");
+  const cleanupAllTerminalBtnEl = document.getElementById("cleanupAllTerminalBtn");
+  const preflightBtnEl = document.getElementById("preflightBtn");
+  const preflightBoxEl = document.getElementById("preflightBox");
+  const autoScrollToggleEl = document.getElementById("autoScrollToggle");
+  const downloadLogBtnEl = document.getElementById("downloadLogBtn");
 
   function boolish(value) {
     return value === true || value === 1 || value === "1" || value === "true";
@@ -124,13 +135,28 @@
   }
 
   function filterTasks(tasks) {
+    const q = String(state.taskSearch || "").trim().toLowerCase();
     return (tasks || []).filter((task) => {
       const status = String(task.status || "");
-      if (state.taskFilter === "active") return ACTIVE_STATUSES.has(status);
-      if (state.taskFilter === "done") return DONE_STATUSES.has(status);
-      if (state.taskFilter === "failed") return FAILED_STATUSES.has(status);
-      return true;
+      if (state.taskFilter === "active" && !ACTIVE_STATUSES.has(status)) return false;
+      if (state.taskFilter === "done" && !DONE_STATUSES.has(status)) return false;
+      if (state.taskFilter === "failed" && !FAILED_STATUSES.has(status)) return false;
+      if (!q) return true;
+      const hay = `${task.id} ${task.name || ""} ${task.last_error || ""} ${task.error_summary || ""}`.toLowerCase();
+      return hay.includes(q);
     });
+  }
+
+  function pushGapOf(task) {
+    if (task.push_gap != null) return Math.max(0, Number(task.push_gap) || 0);
+    const completed = Math.max(0, Number(task.completed_count || 0));
+    const pushed = Math.max(0, Number(task.pushed_count || 0));
+    return Math.max(0, completed - pushed);
+  }
+
+  function errorSummaryOf(task) {
+    const raw = task.error_summary || task.last_error || "";
+    return String(raw || "").trim();
   }
 
   function renderOverview() {
@@ -234,8 +260,22 @@
     taskListEl.innerHTML = filtered.map((task) => {
       const p = progressPercents(task);
       const selected = task.id === state.selectedTaskId ? "selected" : "";
+      const gap = pushGapOf(task);
+      const err = errorSummaryOf(task);
+      const cardClass = [
+        "task-card",
+        selected,
+        gap > 0 ? "has-gap" : "",
+        err ? "has-error" : "",
+      ].filter(Boolean).join(" ");
+      const gapLine = gap > 0
+        ? `<div class="task-gap-line">成功未入池 ${gap}</div>`
+        : "";
+      const errLine = err
+        ? `<div class="task-error-line" title="${escapeHtml(task.last_error || err)}">${escapeHtml(err)}</div>`
+        : "";
       return `
-      <div class="task-card ${selected}" data-task-id="${task.id}" role="button" tabindex="0" aria-label="查看任务 #${task.id}">
+      <div class="${cardClass}" data-task-id="${task.id}" role="button" tabindex="0" aria-label="查看任务 #${task.id}">
         <div class="task-row">
           <strong class="task-title" title="${escapeHtml(task.name)}">#${task.id} ${escapeHtml(task.name)}</strong>
           <span class="${statusClass(task.status)}">${escapeHtml(task.status)}</span>
@@ -246,6 +286,8 @@
           <span class="progress-failed" style="width:${p.failedPct}%"></span>
         </div>
         <div class="task-subrow task-progress-meta">进度 ${p.successPct}% · 入池 ${p.pushedPct}%</div>
+        ${gapLine}
+        ${errLine}
         <div class="task-actions">
           <span class="task-action-hint">点击查看日志</span>
           <button class="button button-danger button-small" type="button" data-delete-task-id="${task.id}">删除</button>
@@ -304,26 +346,32 @@
   function renderTaskDetail(task) {
     detailTitleEl.textContent = `任务 #${task.id} · ${task.name}`;
     stopBtnEl.disabled = !ACTIVE_STATUSES.has(task.status);
+    if (downloadLogBtnEl) downloadLogBtnEl.disabled = false;
     const p = progressPercents(task);
-    detailSummaryEl.innerHTML = [
-      ["状态", task.status],
-      ["目标", task.target_count],
-      ["成功", task.completed_count],
-      ["入池", task.pushed_count || 0],
-      ["失败", task.failed_count],
-      ["新增/更新", `${task.pushed_created || 0}/${task.pushed_updated || 0}`],
-      ["进度", `${p.successPct}%`],
-      ["入池进度", `${p.pushedPct}%`],
-      ["轮次", task.current_round],
-      ["阶段", task.current_phase || "-"],
-    ].map(([label, value]) => `
-      <div class="summary-item">
+    const gap = pushGapOf(task);
+    const err = errorSummaryOf(task);
+    const summaryItems = [
+      ["状态", task.status, ""],
+      ["目标", task.target_count, ""],
+      ["成功", task.completed_count, ""],
+      ["入池", task.pushed_count || 0, ""],
+      ["入池缺口", gap, gap > 0 ? "warn" : ""],
+      ["失败", task.failed_count, Number(task.failed_count || 0) > 0 ? "danger" : ""],
+      ["新增/更新", `${task.pushed_created || 0}/${task.pushed_updated || 0}`, ""],
+      ["进度", `${p.successPct}%`, ""],
+      ["入池进度", `${p.pushedPct}%`, ""],
+      ["轮次", task.current_round, ""],
+      ["阶段", task.current_phase || "-", ""],
+      ["最近错误", err || "-", err ? "danger" : ""],
+    ];
+    detailSummaryEl.innerHTML = summaryItems.map(([label, value, klass]) => `
+      <div class="summary-item ${klass}">
         <div class="meta-item-label">${escapeHtml(label)}</div>
         <div class="meta-item-value">${escapeHtml(value)}</div>
       </div>
     `).join("") + `
-      <div class="summary-item summary-progress full">
-        <div class="meta-item-label">完成进度</div>
+      <div class="summary-item summary-progress full ${gap > 0 ? "warn" : ""}">
+        <div class="meta-item-label">完成进度${gap > 0 ? ` · 有 ${gap} 个成功未入池` : ""}</div>
         <div class="progress-track progress-track-lg" aria-hidden="true">
           <span class="progress-success" style="width:${p.successPct}%"></span>
           <span class="progress-failed" style="width:${p.failedPct}%"></span>
@@ -428,14 +476,16 @@
       renderTaskDetail(taskData.task);
       const logData = await fetchJson(`/api/tasks/${state.selectedTaskId}/logs?limit=250`);
       const lines = logData.lines || [];
+      state.lastLogLines = lines;
       const nearBottom = consoleOutputEl.scrollHeight - consoleOutputEl.scrollTop - consoleOutputEl.clientHeight < 80;
       consoleOutputEl.textContent = lines.join("\n") || "暂无日志";
-      if (nearBottom) {
+      if (state.autoScroll || nearBottom) {
         consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
       }
       if (consoleMetaEl) {
         consoleMetaEl.textContent = `最近 ${lines.length} 行 · 状态 ${taskData.task.status || "-"}`;
       }
+      if (downloadLogBtnEl) downloadLogBtnEl.disabled = false;
     } finally {
       state.refreshingDetail = false;
     }
@@ -470,9 +520,8 @@
     return (state.tasks || []).some((task) => ACTIVE_STATUSES.has(String(task.status || "")));
   }
 
-  formEl.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const payload = {
+  function buildTaskPayload() {
+    return {
       name: formEl.elements.name.value.trim(),
       count: Number(formEl.elements.count.value),
       proxy: formEl.elements.proxy.value.trim() || null,
@@ -488,21 +537,147 @@
       api_token: formEl.elements.api_token.value.trim() || null,
       api_append: formEl.elements.api_append.checked ? true : null,
     };
+  }
+
+  function buildPreflightPayload() {
+    const payload = buildTaskPayload();
+    return {
+      proxy: payload.proxy,
+      browser_proxy: payload.browser_proxy,
+      temp_mail_api_base: payload.temp_mail_api_base,
+      temp_mail_admin_password: payload.temp_mail_admin_password,
+      temp_mail_domain: payload.temp_mail_domain,
+      temp_mail_site_password: payload.temp_mail_site_password,
+      api_endpoint: payload.api_endpoint,
+      api_import_endpoint: payload.api_import_endpoint,
+      api_admin_username: payload.api_admin_username,
+      api_admin_password: payload.api_admin_password,
+    };
+  }
+
+  function renderPreflight(data) {
+    if (!preflightBoxEl) return;
+    const items = data.items || [];
+    const ok = !!data.ok;
+    preflightBoxEl.classList.remove("hidden", "ok", "bad");
+    preflightBoxEl.classList.add(ok ? "ok" : "bad");
+    const title = ok ? "预检通过，可以创建任务" : `预检未通过（${(data.blocking || []).length} 项异常）`;
+    preflightBoxEl.innerHTML = `
+      <div class="preflight-title">${escapeHtml(title)}</div>
+      ${items.map((item) => `
+        <div class="preflight-item">
+          <strong>${escapeHtml(item.label || item.key || "-")}</strong>
+          <span>${item.ok ? "正常" : "异常"} · ${escapeHtml(item.summary || "-")}</span>
+        </div>
+      `).join("")}
+    `;
+  }
+
+  async function runPreflight(showMessage = true) {
+    const payload = buildPreflightPayload();
+    const data = await fetchJson("/api/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    renderPreflight(data);
+    if (showMessage) {
+      formMessageEl.textContent = data.ok ? "预检通过" : "预检未通过，请先检查异常项";
+      formMessageEl.className = data.ok ? "form-message success" : "form-message error";
+    }
+    return data;
+  }
+
+  async function createTaskFromForm(force = false) {
+    const payload = buildTaskPayload();
+    if (!force) {
+      try {
+        const pre = await runPreflight(false);
+        if (!pre.ok) {
+          const go = window.confirm("创建前预检未通过。仍要创建任务吗？");
+          if (!go) {
+            formMessageEl.textContent = "已取消创建（预检未通过）";
+            formMessageEl.className = "form-message error";
+            return;
+          }
+        }
+      } catch (error) {
+        const go = window.confirm(`预检失败：${error.message}\n仍要创建任务吗？`);
+        if (!go) {
+          formMessageEl.textContent = error.message;
+          formMessageEl.className = "form-message error";
+          return;
+        }
+      }
+    }
+    const data = await fetchJson("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.selectedTaskId = data.task.id;
+    formMessageEl.textContent = `任务 #${data.task.id} 已创建`;
+    formMessageEl.className = "form-message success";
+    await refreshAll();
+  }
+
+  formEl.addEventListener("submit", async (event) => {
+    event.preventDefault();
     try {
-      const data = await fetchJson("/api/tasks", {
+      await createTaskFromForm(false);
+    } catch (error) {
+      formMessageEl.textContent = error.message;
+      formMessageEl.className = "form-message error";
+    }
+  });
+
+  async function cleanupTasks(statuses, label) {
+    const confirmed = window.confirm(`确认清理${label}任务吗？运行中的任务不会被删除。`);
+    if (!confirmed) return;
+    try {
+      const data = await fetchJson("/api/tasks/cleanup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ statuses }),
       });
-      state.selectedTaskId = data.task.id;
-      formMessageEl.textContent = `任务 #${data.task.id} 已创建`;
+      if (state.selectedTaskId && (data.deleted_ids || []).includes(state.selectedTaskId)) {
+        state.selectedTaskId = null;
+        detailTitleEl.textContent = "实时控制台";
+        detailSummaryEl.innerHTML = "";
+        detailMetaEl.innerHTML = "";
+        detailMetaEl.classList.add("hidden");
+        consoleOutputEl.textContent = "选择任务后显示输出";
+        if (consoleMetaEl) consoleMetaEl.textContent = "选择任务后显示输出";
+        if (downloadLogBtnEl) downloadLogBtnEl.disabled = true;
+      }
+      formMessageEl.textContent = `已清理 ${data.deleted_count || 0} 个任务`;
       formMessageEl.className = "form-message success";
       await refreshAll();
     } catch (error) {
       formMessageEl.textContent = error.message;
       formMessageEl.className = "form-message error";
     }
-  });
+  }
+
+  async function downloadSelectedLogs() {
+    if (!state.selectedTaskId) return;
+    try {
+      const data = await fetchJson(`/api/tasks/${state.selectedTaskId}/logs/download?limit=5000`);
+      const lines = data.lines || state.lastLogLines || [];
+      const blob = new Blob([lines.join("\n") + "\n"], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename || `task-${state.selectedTaskId}.log`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      formMessageEl.textContent = error.message;
+      formMessageEl.className = "form-message error";
+    }
+  }
 
   stopBtnEl.addEventListener("click", async () => {
     if (!state.selectedTaskId) return;
@@ -585,6 +760,51 @@
         chip.classList.toggle("active", chip === btn);
       });
       renderTaskList();
+    });
+  }
+
+  if (taskSearchInputEl) {
+    taskSearchInputEl.addEventListener("input", () => {
+      state.taskSearch = taskSearchInputEl.value || "";
+      renderTaskList();
+    });
+  }
+  if (cleanupDoneBtnEl) {
+    cleanupDoneBtnEl.addEventListener("click", () => cleanupTasks(["completed", "stopped"], "已完成/已停止"));
+  }
+  if (cleanupFailedBtnEl) {
+    cleanupFailedBtnEl.addEventListener("click", () => cleanupTasks(["failed", "partial"], "失败/部分"));
+  }
+  if (cleanupAllTerminalBtnEl) {
+    cleanupAllTerminalBtnEl.addEventListener("click", () => cleanupTasks(["completed", "stopped", "failed", "partial"], "全部终态"));
+  }
+  if (preflightBtnEl) {
+    preflightBtnEl.addEventListener("click", async () => {
+      try {
+        await runPreflight(true);
+      } catch (error) {
+        formMessageEl.textContent = error.message;
+        formMessageEl.className = "form-message error";
+      }
+    });
+  }
+  if (autoScrollToggleEl) {
+    state.autoScroll = !!autoScrollToggleEl.checked;
+    autoScrollToggleEl.addEventListener("change", () => {
+      state.autoScroll = !!autoScrollToggleEl.checked;
+    });
+  }
+  if (downloadLogBtnEl) {
+    downloadLogBtnEl.addEventListener("click", downloadSelectedLogs);
+  }
+  if (consoleOutputEl) {
+    consoleOutputEl.addEventListener("scroll", () => {
+      if (!autoScrollToggleEl) return;
+      const nearBottom = consoleOutputEl.scrollHeight - consoleOutputEl.scrollTop - consoleOutputEl.clientHeight < 80;
+      // If user scrolls up, keep their place unless they re-enable auto scroll.
+      if (!nearBottom && state.autoScroll) {
+        // soft hint only; do not force toggle off automatically
+      }
     });
   }
 
