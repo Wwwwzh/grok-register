@@ -11,6 +11,7 @@
     selectedTaskId: null,
     taskFilter: "all",
     taskSearch: "",
+    templates: [],
     lastHealth: null,
     lastLogLines: [],
     autoScroll: true,
@@ -55,6 +56,10 @@
   const preflightBoxEl = document.getElementById("preflightBox");
   const autoScrollToggleEl = document.getElementById("autoScrollToggle");
   const downloadLogBtnEl = document.getElementById("downloadLogBtn");
+  const templateSelectEl = document.getElementById("templateSelect");
+  const applyTemplateBtnEl = document.getElementById("applyTemplateBtn");
+  const saveTemplateBtnEl = document.getElementById("saveTemplateBtn");
+  const deleteTemplateBtnEl = document.getElementById("deleteTemplateBtn");
 
   function boolish(value) {
     return value === true || value === 1 || value === "1" || value === "true";
@@ -157,6 +162,139 @@
   function errorSummaryOf(task) {
     const raw = task.error_summary || task.last_error || "";
     return String(raw || "").trim();
+  }
+
+  const ERROR_TYPE_LABELS = {
+    mail: "邮箱",
+    proxy: "代理",
+    captcha: "验证码",
+    xai: "注册",
+    import: "入池",
+    other: "其他",
+    unknown: "未知",
+  };
+
+  function errorTypeLabel(type) {
+    return ERROR_TYPE_LABELS[type] || type || "未知";
+  }
+
+  function errorCountsOf(task) {
+    return task.error_counts || {};
+  }
+
+  function topErrorTypeOf(task) {
+    return String(task.top_error_type || "").trim();
+  }
+
+  function renderErrorTypePills(task, { compact = false } = {}) {
+    const counts = errorCountsOf(task);
+    const top = topErrorTypeOf(task);
+    const entries = Object.entries(counts)
+      .filter(([, n]) => Number(n) > 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]));
+    if (!entries.length) return "";
+    const shown = compact ? entries.slice(0, 3) : entries;
+    return `
+      <div class="error-type-pills">
+        ${shown.map(([type, n]) => `
+          <span class="error-type-pill ${type} ${type === top ? "top" : ""}">${escapeHtml(errorTypeLabel(type))} ${Number(n)}</span>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  function renderTemplates() {
+    if (!templateSelectEl) return;
+    const current = templateSelectEl.value;
+    const options = ['<option value="">不使用模板</option>']
+      .concat((state.templates || []).map((tpl) => {
+        const id = escapeHtml(tpl.id || tpl.name || "");
+        const name = escapeHtml(tpl.name || "未命名模板");
+        const count = tpl.count != null ? ` · ${tpl.count}次` : "";
+        return `<option value="${id}">${name}${count}</option>`;
+      }));
+    templateSelectEl.innerHTML = options.join("");
+    if (current && [...templateSelectEl.options].some((o) => o.value === current)) {
+      templateSelectEl.value = current;
+    }
+  }
+
+  async function refreshTemplates() {
+    const data = await fetchJson("/api/templates");
+    state.templates = data.templates || [];
+    renderTemplates();
+  }
+
+  function findTemplate(idOrName) {
+    const key = String(idOrName || "").trim();
+    if (!key) return null;
+    return (state.templates || []).find((tpl) => String(tpl.id || "") === key || String(tpl.name || "") === key) || null;
+  }
+
+  function applyTemplateToForm(tpl) {
+    if (!tpl) return;
+    if (tpl.name) {
+      // Keep a fresh batch-ish name, but preserve template prefix.
+      const base = String(tpl.name).replace(/-\d+$/, "");
+      formEl.elements.name.value = `${base}-${Date.now().toString().slice(-6)}`;
+    }
+    if (tpl.count != null) formEl.elements.count.value = tpl.count;
+    const fields = [
+      "proxy",
+      "browser_proxy",
+      "temp_mail_api_base",
+      "temp_mail_admin_password",
+      "temp_mail_domain",
+      "temp_mail_site_password",
+      "api_endpoint",
+      "api_import_endpoint",
+      "api_admin_username",
+      "api_admin_password",
+      "api_token",
+    ];
+    // Ensure advanced fields visible if template has overrides.
+    let hasOverride = false;
+    fields.forEach((key) => {
+      if (!formEl.elements[key]) return;
+      const value = tpl[key];
+      if (value != null && String(value).trim() !== "") {
+        formEl.elements[key].value = value;
+        hasOverride = true;
+      }
+    });
+    if (formEl.elements.api_append) {
+      if (tpl.api_append === true || tpl.api_append === false) {
+        formEl.elements.api_append.checked = !!tpl.api_append;
+        hasOverride = true;
+      }
+    }
+    if (hasOverride && advancedFieldsEl.classList.contains("hidden")) {
+      advancedFieldsEl.classList.remove("hidden");
+      toggleAdvancedBtnEl.textContent = "收起高级设置";
+    }
+  }
+
+  function buildTemplatePayloadFromForm() {
+    const name = window.prompt("模板名称", formEl.elements.name.value.trim() || `模板-${Date.now().toString().slice(-4)}`);
+    if (!name) return null;
+    const payload = buildTaskPayload();
+    return {
+      name: name.trim(),
+      count: payload.count,
+      proxy: payload.proxy || "",
+      browser_proxy: payload.browser_proxy || "",
+      temp_mail_api_base: payload.temp_mail_api_base || "",
+      temp_mail_admin_password: payload.temp_mail_admin_password || "",
+      temp_mail_domain: payload.temp_mail_domain || "",
+      temp_mail_site_password: payload.temp_mail_site_password || "",
+      api_endpoint: payload.api_endpoint || "",
+      api_import_endpoint: payload.api_import_endpoint || "",
+      api_admin_username: payload.api_admin_username || "",
+      api_admin_password: payload.api_admin_password || "",
+      api_token: payload.api_token || "",
+      api_append: formEl.elements.api_append.checked ? true : null,
+      notes: "",
+    };
   }
 
   function renderOverview() {
@@ -274,6 +412,10 @@
       const errLine = err
         ? `<div class="task-error-line" title="${escapeHtml(task.last_error || err)}">${escapeHtml(err)}</div>`
         : "";
+      const topType = topErrorTypeOf(task);
+      const typeLine = topType
+        ? `<div class="error-type-line">主因 ${escapeHtml(errorTypeLabel(topType))}${task.top_error_count ? ` ×${task.top_error_count}` : ""}</div>${renderErrorTypePills(task, { compact: true })}`
+        : "";
       return `
       <div class="${cardClass}" data-task-id="${task.id}" role="button" tabindex="0" aria-label="查看任务 #${task.id}">
         <div class="task-row">
@@ -287,6 +429,7 @@
         </div>
         <div class="task-subrow task-progress-meta">进度 ${p.successPct}% · 入池 ${p.pushedPct}%</div>
         ${gapLine}
+        ${typeLine}
         ${errLine}
         <div class="task-actions">
           <span class="task-action-hint">点击查看日志</span>
@@ -364,12 +507,20 @@
       ["阶段", task.current_phase || "-", ""],
       ["最近错误", err || "-", err ? "danger" : ""],
     ];
+    const topType = topErrorTypeOf(task);
+    if (topType) {
+      summaryItems.splice(5, 0, ["主因类型", `${errorTypeLabel(topType)}${task.top_error_count ? ` ×${task.top_error_count}` : ""}`, "danger"]);
+    }
     detailSummaryEl.innerHTML = summaryItems.map(([label, value, klass]) => `
       <div class="summary-item ${klass}">
         <div class="meta-item-label">${escapeHtml(label)}</div>
         <div class="meta-item-value">${escapeHtml(value)}</div>
       </div>
     `).join("") + `
+      <div class="summary-item summary-error-types full">
+        <div class="meta-item-label">错误类型聚合</div>
+        <div class="meta-item-value">${renderErrorTypePills(task) || "暂无分类错误"}</div>
+      </div>
       <div class="summary-item summary-progress full ${gap > 0 ? "warn" : ""}">
         <div class="meta-item-label">完成进度${gap > 0 ? ` · 有 ${gap} 个成功未入池` : ""}</div>
         <div class="progress-track progress-track-lg" aria-hidden="true">
@@ -797,6 +948,63 @@
   if (downloadLogBtnEl) {
     downloadLogBtnEl.addEventListener("click", downloadSelectedLogs);
   }
+  if (applyTemplateBtnEl) {
+    applyTemplateBtnEl.addEventListener("click", () => {
+      const tpl = findTemplate(templateSelectEl?.value || "");
+      if (!tpl) {
+        formMessageEl.textContent = "请先选择模板";
+        formMessageEl.className = "form-message error";
+        return;
+      }
+      applyTemplateToForm(tpl);
+      formMessageEl.textContent = `已套用模板：${tpl.name}`;
+      formMessageEl.className = "form-message success";
+    });
+  }
+  if (saveTemplateBtnEl) {
+    saveTemplateBtnEl.addEventListener("click", async () => {
+      try {
+        const payload = buildTemplatePayloadFromForm();
+        if (!payload) return;
+        const data = await fetchJson("/api/templates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        state.templates = data.templates || [];
+        renderTemplates();
+        if (templateSelectEl && data.template?.id) templateSelectEl.value = data.template.id;
+        formMessageEl.textContent = `模板已保存：${payload.name}`;
+        formMessageEl.className = "form-message success";
+      } catch (error) {
+        formMessageEl.textContent = error.message;
+        formMessageEl.className = "form-message error";
+      }
+    });
+  }
+  if (deleteTemplateBtnEl) {
+    deleteTemplateBtnEl.addEventListener("click", async () => {
+      const key = templateSelectEl?.value || "";
+      if (!key) {
+        formMessageEl.textContent = "请先选择要删除的模板";
+        formMessageEl.className = "form-message error";
+        return;
+      }
+      const tpl = findTemplate(key);
+      const label = tpl?.name || key;
+      if (!window.confirm(`确认删除模板「${label}」吗？`)) return;
+      try {
+        const data = await fetchJson(`/api/templates/${encodeURIComponent(key)}`, { method: "DELETE" });
+        state.templates = data.templates || [];
+        renderTemplates();
+        formMessageEl.textContent = `模板已删除：${label}`;
+        formMessageEl.className = "form-message success";
+      } catch (error) {
+        formMessageEl.textContent = error.message;
+        formMessageEl.className = "form-message error";
+      }
+    });
+  }
   if (consoleOutputEl) {
     consoleOutputEl.addEventListener("scroll", () => {
       if (!autoScrollToggleEl) return;
@@ -810,6 +1018,10 @@
 
   setDefaults();
   setSettingsOpen(false);
+  refreshTemplates().catch((error) => {
+    formMessageEl.textContent = error.message;
+    formMessageEl.className = "form-message error";
+  });
   refreshHealth();
   refreshAll();
 

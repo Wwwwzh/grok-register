@@ -803,3 +803,64 @@ body {
     width: 100%;
   }
 }
+
+
+.template-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.template-row select {
+  flex: 1 1 180px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 11px 12px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.error-type-line {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #6b5b4d;
+  line-height: 1.4;
+}
+
+.error-type-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.error-type-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f1e7da;
+  color: #5d4d3f;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.error-type-pill.top {
+  background: #f7d9d3;
+  color: var(--danger);
+}
+
+.error-type-pill.captcha { background: #efe4c8; color: #8f5b00; }
+.error-type-pill.mail { background: #dcefdc; color: var(--success); }
+.error-type-pill.proxy { background: #d9e8ff; color: #2857b5; }
+.error-type-pill.import { background: #f4e3c5; color: #8f5b00; }
+.error-type-pill.xai { background: #eadff5; color: #6a3f8f; }
+
+.summary-error-types {
+  grid-column: 1 / -1;
+}

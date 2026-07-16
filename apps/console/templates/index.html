@@ -150,6 +150,18 @@
           </div>
 
           <form id="taskForm" class="task-form">
+            <label class="full">
+              <span>任务模板</span>
+              <small>一键套用常用配置；可保存当前表单为模板。</small>
+              <div class="template-row">
+                <select id="templateSelect" name="template_select">
+                  <option value="">不使用模板</option>
+                </select>
+                <button id="applyTemplateBtn" class="button button-secondary button-small" type="button">套用</button>
+                <button id="saveTemplateBtn" class="button button-secondary button-small" type="button">保存为模板</button>
+                <button id="deleteTemplateBtn" class="button button-danger button-small" type="button">删除模板</button>
+              </div>
+            </label>
             <label>
               <span>任务名称</span>
               <small>便于识别的批次名。</small>

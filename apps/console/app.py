@@ -743,6 +743,25 @@ class PreflightRequest(BaseModel):
     api_admin_password: str | None = None
 
 
+class TaskTemplate(BaseModel):
+    id: str | None = None
+    name: str = Field(..., min_length=1, max_length=80)
+    count: int = Field(50, ge=1, le=5000)
+    proxy: str = ""
+    browser_proxy: str = ""
+    temp_mail_api_base: str = ""
+    temp_mail_admin_password: str = ""
+    temp_mail_domain: str = ""
+    temp_mail_site_password: str = ""
+    api_endpoint: str = ""
+    api_import_endpoint: str = ""
+    api_admin_username: str = ""
+    api_admin_password: str = ""
+    api_token: str = ""
+    api_append: bool | None = None
+    notes: str = ""
+
+
 ACTIVE_TASK_STATUSES = {STATUS_QUEUED, STATUS_RUNNING, STATUS_STOPPING}
 TERMINAL_CLEANUP_STATUSES = {
     STATUS_COMPLETED,
@@ -786,6 +805,117 @@ def write_settings(settings: SystemSettings) -> dict[str, Any]:
         ("system", json.dumps(data, ensure_ascii=False), now_iso()),
     )
     return data
+
+
+def read_templates() -> list[dict[str, Any]]:
+    row = fetch_one("SELECT value FROM settings WHERE key = ?", ("templates",))
+    if not row:
+        return []
+    try:
+        data = json.loads(row["value"])
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in data:
+        if isinstance(item, dict) and str(item.get("name") or "").strip():
+            out.append(item)
+    return out
+
+
+def write_templates(templates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload = json.dumps(templates, ensure_ascii=False)
+    execute_no_return(
+        """
+        INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        ("templates", payload, now_iso()),
+    )
+    return templates
+
+
+def classify_error_text(text: str) -> str:
+    value = (text or "").lower()
+    if not value:
+        return "unknown"
+    rules = [
+        ("captcha", ("turnstile", "captcha", "cloudflare", "cf-challenge", "challenge")),
+        ("mail", ("temp mail", "temp_mail", "mailbox", "email", "imap", "duckmail", "验证码", "mailbox")),
+        ("proxy", ("proxy", "warp", "socks", "tunnel", "network is unreachable", "connection refused", "timed out", "timeout", "proxyerror")),
+        ("import", ("import", "grok2api", "push", "入池", "sso", "token sink", "admin login")),
+        ("xai", ("x.ai", "accounts.x.ai", "register", "signup", "最终注册", "registration")),
+    ]
+    for key, needles in rules:
+        if any(n in value for n in needles):
+            return key
+    if "[error]" in value or "失败" in value or "error" in value:
+        return "other"
+    return "unknown"
+
+
+def classify_task_errors(console_path: Path | None, last_error: str = "") -> dict[str, Any]:
+    counts = {
+        "mail": 0,
+        "proxy": 0,
+        "captcha": 0,
+        "xai": 0,
+        "import": 0,
+        "other": 0,
+        "unknown": 0,
+    }
+    samples: dict[str, str] = {}
+    lines: list[str] = []
+    if console_path is not None and console_path.exists():
+        try:
+            lines = console_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            lines = []
+    error_lines = []
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if "[Error]" in line or "失败" in line or "turnstile" in line.lower() or "push" in line.lower() and "失败" in line:
+            error_lines.append(line)
+    if last_error:
+        error_lines.append(str(last_error))
+    # Prefer explicit error regex matches if present
+    for raw in lines:
+        m = LINE_RE_ERROR.search(raw)
+        if m:
+            error_lines.append(m.group(2).strip())
+    # de-dup while preserving order
+    seen = set()
+    uniq = []
+    for item in error_lines:
+        key = item.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        uniq.append(key)
+    for item in uniq:
+        kind = classify_error_text(item)
+        counts[kind] = counts.get(kind, 0) + 1
+        samples.setdefault(kind, item[:160])
+    top = None
+    top_count = 0
+    for key, value in counts.items():
+        if value > top_count:
+            top = key
+            top_count = value
+    if not top_count and last_error:
+        top = classify_error_text(last_error)
+        counts[top] = 1
+        samples[top] = str(last_error)[:160]
+        top_count = 1
+    return {
+        "error_counts": counts,
+        "error_samples": samples,
+        "top_error_type": top if top_count else "",
+        "top_error_count": top_count,
+    }
 
 
 def get_max_concurrent_tasks(saved: dict[str, Any] | None = None) -> int:
@@ -958,6 +1088,7 @@ def serialize_task(row: sqlite3.Row) -> dict[str, Any]:
     error_summary = " ".join(str(last_error).split())
     if len(error_summary) > 120:
         error_summary = error_summary[:117] + "..."
+    classified = classify_task_errors(console_path, last_error=last_error)
     return {
         "id": int(row["id"]),
         "name": row["name"],
@@ -972,6 +1103,10 @@ def serialize_task(row: sqlite3.Row) -> dict[str, Any]:
         "error_summary": error_summary,
         "push_gap": push_gap,
         "has_push_gap": push_gap > 0,
+        "error_counts": classified.get("error_counts") or {},
+        "error_samples": classified.get("error_samples") or {},
+        "top_error_type": classified.get("top_error_type") or "",
+        "top_error_count": classified.get("top_error_count") or 0,
         "last_log_at": row["last_log_at"] or "",
         "notes": row["notes"] or "",
         "config": json.loads(row["config_json"]),
@@ -1446,6 +1581,61 @@ def save_settings(payload: SystemSettings) -> dict[str, Any]:
         "max_concurrent_tasks": defaults.get("max_concurrent_tasks", get_max_concurrent_tasks()),
         "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,
     }
+
+
+@app.get("/api/templates")
+def list_templates() -> dict[str, Any]:
+    return {"templates": read_templates()}
+
+
+@app.post("/api/templates")
+def upsert_template(payload: TaskTemplate) -> dict[str, Any]:
+    templates = read_templates()
+    item = payload.model_dump()
+    name = str(item.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="template name is required")
+    item["name"] = name
+    item_id = str(item.get("id") or "").strip()
+    if not item_id:
+        stamp = (
+            now_iso()
+            .replace("-", "")
+            .replace(":", "")
+            .replace("T", "")
+            .replace("Z", "")
+            .replace(" ", "")
+            .split(".")[0]
+        )
+        item_id = f"tpl_{stamp}_{len(templates) + 1}"
+    item["id"] = item_id
+    replaced = False
+    for idx, old in enumerate(templates):
+        if str(old.get("id") or "") == item_id or str(old.get("name") or "") == name:
+            # keep existing secrets if new password empty
+            if not str(item.get("api_admin_password") or "").strip():
+                item["api_admin_password"] = old.get("api_admin_password") or ""
+            if not str(item.get("temp_mail_admin_password") or "").strip() and old.get("temp_mail_admin_password"):
+                item["temp_mail_admin_password"] = old.get("temp_mail_admin_password") or ""
+            templates[idx] = item
+            replaced = True
+            break
+    if not replaced:
+        templates.insert(0, item)
+    # cap templates
+    templates = templates[:30]
+    write_templates(templates)
+    return {"ok": True, "template": item, "templates": templates}
+
+
+@app.delete("/api/templates/{template_id}")
+def delete_template(template_id: str) -> dict[str, Any]:
+    templates = read_templates()
+    kept = [t for t in templates if str(t.get("id") or "") != template_id and str(t.get("name") or "") != template_id]
+    if len(kept) == len(templates):
+        raise HTTPException(status_code=404, detail="Template not found")
+    write_templates(kept)
+    return {"ok": True, "templates": kept}
 
 
 @app.get("/api/tasks")
