@@ -141,10 +141,11 @@
 
     taskListEl.innerHTML = state.tasks.map((task) => {
       const p = progressPercents(task);
+      const selected = task.id === state.selectedTaskId ? "selected" : "";
       return `
-      <button class="task-card ${task.id === state.selectedTaskId ? "selected" : ""}" data-task-id="${task.id}">
+      <div class="task-card ${selected}" data-task-id="${task.id}" role="button" tabindex="0" aria-label="查看任务 #${task.id}">
         <div class="task-row">
-          <strong title="${escapeHtml(task.name)}">#${task.id} ${escapeHtml(task.name)}</strong>
+          <strong class="task-title" title="${escapeHtml(task.name)}">#${task.id} ${escapeHtml(task.name)}</strong>
           <span class="${statusClass(task.status)}">${escapeHtml(task.status)}</span>
         </div>
         <div class="task-subrow">目标 ${p.target} · 成功 ${p.success} · 入池 ${p.pushed} · 失败 ${p.failed}</div>
@@ -157,14 +158,25 @@
           <span class="task-action-hint">点击查看日志</span>
           <button class="button button-danger button-small" type="button" data-delete-task-id="${task.id}">删除</button>
         </div>
-      </button>`;
+      </div>`;
     }).join("");
 
-    taskListEl.querySelectorAll("[data-task-id]").forEach((button) => {
-      button.addEventListener("click", () => {
-        state.selectedTaskId = Number(button.dataset.taskId);
+    taskListEl.querySelectorAll(".task-card[data-task-id]").forEach((card) => {
+      const selectTask = () => {
+        state.selectedTaskId = Number(card.dataset.taskId);
         renderTaskList();
         refreshDetail();
+      };
+      card.addEventListener("click", (event) => {
+        // Ignore clicks on nested controls (delete button).
+        if (event.target.closest("[data-delete-task-id]")) return;
+        selectTask();
+      });
+      card.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectTask();
+        }
       });
     });
 

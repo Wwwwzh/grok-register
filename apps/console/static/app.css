@@ -284,11 +284,18 @@ body {
   text-align: left;
   cursor: pointer;
   width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .task-card.selected {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(180, 71, 43, 0.12);
+}
+
+.task-card:focus-visible {
+  outline: 3px solid rgba(180, 71, 43, 0.28);
+  outline-offset: 2px;
 }
 
 .task-row,
@@ -297,6 +304,16 @@ body {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
+  min-width: 0;
+}
+
+.task-title {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
 }
 
 .task-subrow {
@@ -304,6 +321,8 @@ body {
   color: var(--muted);
   font-size: 13px;
   justify-content: flex-start;
+  flex-wrap: wrap;
+  line-height: 1.4;
 }
 
 .task-actions {
@@ -312,11 +331,17 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .task-action-hint {
   color: var(--muted);
   font-size: 12px;
+  min-width: 0;
+}
+
+.task-actions .button {
+  flex: 0 0 auto;
 }
 
 .status-pill {
