@@ -2,16 +2,28 @@
   const BASE_PATH = String(window.__BASE_PATH__ || "").replace(/\/$/, "");
   const apiUrl = (path) => `${BASE_PATH}${path.startsWith("/") ? path : `/${path}`}`;
 
+  const ACTIVE_STATUSES = new Set(["queued", "running", "stopping"]);
+  const DONE_STATUSES = new Set(["completed", "stopped"]);
+  const FAILED_STATUSES = new Set(["failed", "partial"]);
+
   const state = {
     tasks: [],
     selectedTaskId: null,
+    taskFilter: "all",
+    lastHealth: null,
+    refreshingTasks: false,
+    refreshingDetail: false,
+    refreshingHealth: false,
   };
 
   const taskListEl = document.getElementById("taskList");
+  const taskListMetaEl = document.getElementById("taskListMeta");
+  const taskFiltersEl = document.getElementById("taskFilters");
   const detailTitleEl = document.getElementById("detailTitle");
   const detailMetaEl = document.getElementById("detailMeta");
   const detailSummaryEl = document.getElementById("detailSummary");
   const consoleOutputEl = document.getElementById("consoleOutput");
+  const consoleMetaEl = document.getElementById("consoleMeta");
   const formEl = document.getElementById("taskForm");
   const settingsFormEl = document.getElementById("settingsForm");
   const formMessageEl = document.getElementById("formMessage");
@@ -20,11 +32,18 @@
   const refreshBtnEl = document.getElementById("refreshBtn");
   const healthRefreshBtnEl = document.getElementById("healthRefreshBtn");
   const toggleSettingsBtnEl = document.getElementById("toggleSettingsBtn");
+  const toggleSettingsHeadBtnEl = document.getElementById("toggleSettingsHeadBtn");
   const toggleAdvancedBtnEl = document.getElementById("toggleAdvancedBtn");
   const toggleMailBtnEl = document.getElementById("toggleMailBtn");
   const advancedFieldsEl = document.getElementById("advancedFields");
   const healthGridEl = document.getElementById("healthGrid");
   const healthMetaEl = document.getElementById("healthMeta");
+  const overviewRunningEl = document.getElementById("overviewRunning");
+  const overviewRunningHintEl = document.getElementById("overviewRunningHint");
+  const overviewPoolTotalEl = document.getElementById("overviewPoolTotal");
+  const overviewPoolHintEl = document.getElementById("overviewPoolHint");
+  const overviewHealthEl = document.getElementById("overviewHealth");
+  const overviewHealthHintEl = document.getElementById("overviewHealthHint");
 
   function boolish(value) {
     return value === true || value === 1 || value === "1" || value === "true";
@@ -35,6 +54,14 @@
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;");
+  }
+
+  function setSettingsOpen(open) {
+    settingsFormEl.classList.toggle("hidden", !open);
+    const label = open ? "收起配置" : "展开配置";
+    const topLabel = open ? "收起设置" : "系统设置";
+    if (toggleSettingsHeadBtnEl) toggleSettingsHeadBtnEl.textContent = label;
+    if (toggleSettingsBtnEl) toggleSettingsBtnEl.textContent = topLabel;
   }
 
   function setDefaults() {
@@ -65,7 +92,6 @@
     if (settingsFormEl.elements.api_admin_username) {
       settingsFormEl.elements.api_admin_username.value = defaults.api?.admin_username || "admin";
     }
-    // Never prefill password into the form; empty means "keep existing" on save.
     if (settingsFormEl.elements.api_admin_password) {
       settingsFormEl.elements.api_admin_password.value = "";
       const configured = boolish(defaults.api?.admin_password_configured || defaults.api?.admin_password);
@@ -86,7 +112,68 @@
     return ok ? "health-pill health-ok" : "health-pill health-bad";
   }
 
+  function progressPercents(task) {
+    const target = Math.max(1, Number(task.target_count || 1));
+    const success = Math.max(0, Number(task.completed_count || 0));
+    const failed = Math.max(0, Number(task.failed_count || 0));
+    const pushed = Math.max(0, Number(task.pushed_count || 0));
+    const successPct = Math.min(100, Math.round((success / target) * 100));
+    const failedPct = Math.min(100 - successPct, Math.round((failed / target) * 100));
+    const pushedPct = Math.min(100, Math.round((pushed / target) * 100));
+    return { successPct, failedPct, pushedPct, success, failed, pushed, target };
+  }
+
+  function filterTasks(tasks) {
+    return (tasks || []).filter((task) => {
+      const status = String(task.status || "");
+      if (state.taskFilter === "active") return ACTIVE_STATUSES.has(status);
+      if (state.taskFilter === "done") return DONE_STATUSES.has(status);
+      if (state.taskFilter === "failed") return FAILED_STATUSES.has(status);
+      return true;
+    });
+  }
+
+  function renderOverview() {
+    const tasks = state.tasks || [];
+    const running = tasks.filter((t) => t.status === "running").length;
+    const queued = tasks.filter((t) => t.status === "queued").length;
+    const stopping = tasks.filter((t) => t.status === "stopping").length;
+    if (overviewRunningEl) overviewRunningEl.textContent = String(running + queued + stopping);
+    if (overviewRunningHintEl) {
+      overviewRunningHintEl.textContent = `running ${running} · queued ${queued} · stopping ${stopping}`;
+    }
+
+    const pool = (state.lastHealth && state.lastHealth.pool) || {};
+    const providers = pool.providers || {};
+    if (overviewPoolTotalEl) {
+      overviewPoolTotalEl.textContent = pool.total != null ? String(pool.total) : "-";
+    }
+    if (overviewPoolHintEl) {
+      const bits = [];
+      if (providers.grok_web != null) bits.push(`web ${providers.grok_web}`);
+      if (providers.grok_build != null) bits.push(`build ${providers.grok_build}`);
+      if (providers.grok_console != null) bits.push(`console ${providers.grok_console}`);
+      overviewPoolHintEl.textContent = bits.length ? bits.join(" · ") : "web / build / console";
+    }
+
+    const items = (state.lastHealth && state.lastHealth.items) || [];
+    if (overviewHealthEl) {
+      if (!items.length) {
+        overviewHealthEl.textContent = "-";
+      } else {
+        const okCount = items.filter((item) => item.ok).length;
+        overviewHealthEl.textContent = `${okCount}/${items.length}`;
+      }
+    }
+    if (overviewHealthHintEl) {
+      overviewHealthHintEl.textContent = state.lastHealth?.checked_at
+        ? `检测于 ${state.lastHealth.checked_at}`
+        : "等待检测";
+    }
+  }
+
   function renderHealth(data) {
+    state.lastHealth = data || null;
     const items = data.items || [];
     const pool = data.pool || {};
     const poolBits = [];
@@ -99,12 +186,17 @@
       `最近检测时间 ${data.checked_at || "-"}`,
       poolBits.length ? poolBits.join(" · ") : "",
     ].filter(Boolean).join(" | ");
+
     if (!items.length) {
       healthGridEl.innerHTML = '<div class="empty">暂无健康检查结果</div>';
+      renderOverview();
       return;
     }
+
     healthGridEl.innerHTML = items.map((item) => {
-      const isPool = item.key === "pool" || String(item.label || "").toLowerCase().includes("pool") || String(item.label || "").includes("号池");
+      const isPool = item.key === "pool"
+        || String(item.label || "").toLowerCase().includes("pool")
+        || String(item.label || "").includes("号池");
       const extra = isPool && pool.import_summary
         ? `<div class="health-detail">import: ${escapeHtml(pool.import_summary)}</div>`
         : "";
@@ -120,26 +212,26 @@
         ${extra}
       </div>`;
     }).join("");
-  }
-
-  function progressPercents(task) {
-    const target = Math.max(1, Number(task.target_count || 1));
-    const success = Math.max(0, Number(task.completed_count || 0));
-    const failed = Math.max(0, Number(task.failed_count || 0));
-    const pushed = Math.max(0, Number(task.pushed_count || 0));
-    const successPct = Math.min(100, Math.round((success / target) * 100));
-    const failedPct = Math.min(100 - successPct, Math.round((failed / target) * 100));
-    const pushedPct = Math.min(100, Math.round((pushed / target) * 100));
-    return { successPct, failedPct, pushedPct, success, failed, pushed, target };
+    renderOverview();
   }
 
   function renderTaskList() {
+    const filtered = filterTasks(state.tasks);
+    if (taskListMetaEl) {
+      taskListMetaEl.textContent = `显示 ${filtered.length} / ${state.tasks.length} 个任务`;
+    }
     if (!state.tasks.length) {
       taskListEl.innerHTML = '<div class="empty">暂无任务</div>';
+      renderOverview();
+      return;
+    }
+    if (!filtered.length) {
+      taskListEl.innerHTML = '<div class="empty">当前筛选下没有任务</div>';
+      renderOverview();
       return;
     }
 
-    taskListEl.innerHTML = state.tasks.map((task) => {
+    taskListEl.innerHTML = filtered.map((task) => {
       const p = progressPercents(task);
       const selected = task.id === state.selectedTaskId ? "selected" : "";
       return `
@@ -168,7 +260,6 @@
         refreshDetail();
       };
       card.addEventListener("click", (event) => {
-        // Ignore clicks on nested controls (delete button).
         if (event.target.closest("[data-delete-task-id]")) return;
         selectTask();
       });
@@ -193,7 +284,10 @@
             detailTitleEl.textContent = "实时控制台";
             detailSummaryEl.innerHTML = "";
             detailMetaEl.innerHTML = "";
+            detailMetaEl.classList.add("hidden");
             consoleOutputEl.textContent = "选择任务后显示输出";
+            if (consoleMetaEl) consoleMetaEl.textContent = "选择任务后显示输出";
+            if (toggleMailBtnEl) toggleMailBtnEl.textContent = "任务参数";
           }
           await refreshTasks();
           await refreshDetail();
@@ -203,23 +297,25 @@
         }
       });
     });
+
+    renderOverview();
   }
 
   function renderTaskDetail(task) {
     detailTitleEl.textContent = `任务 #${task.id} · ${task.name}`;
-    stopBtnEl.disabled = !["queued", "running", "stopping"].includes(task.status);
+    stopBtnEl.disabled = !ACTIVE_STATUSES.has(task.status);
     const p = progressPercents(task);
     detailSummaryEl.innerHTML = [
       ["状态", task.status],
-      ["目标次数", task.target_count],
-      ["成功数", task.completed_count],
-      ["入池数", task.pushed_count || 0],
+      ["目标", task.target_count],
+      ["成功", task.completed_count],
+      ["入池", task.pushed_count || 0],
+      ["失败", task.failed_count],
       ["新增/更新", `${task.pushed_created || 0}/${task.pushed_updated || 0}`],
-      ["失败数", task.failed_count],
       ["进度", `${p.successPct}%`],
       ["入池进度", `${p.pushedPct}%`],
-      ["当前轮次", task.current_round],
-      ["当前阶段", task.current_phase || "-"],
+      ["轮次", task.current_round],
+      ["阶段", task.current_phase || "-"],
     ].map(([label, value]) => `
       <div class="summary-item">
         <div class="meta-item-label">${escapeHtml(label)}</div>
@@ -242,6 +338,8 @@
       ["站点密码", cfg.temp_mail_site_password || "-"],
       ["请求代理", cfg.proxy || "-"],
       ["浏览器代理", cfg.browser_proxy || "-"],
+      ["Login", (cfg.api && cfg.api.endpoint) || cfg.api_endpoint || "-"],
+      ["Import", (cfg.api && cfg.api.import_endpoint) || cfg.api_import_endpoint || "-"],
       ["最近邮箱", task.last_email || "-"],
       ["最近错误", task.last_error || "-"],
       ["创建时间", task.created_at || "-"],
@@ -301,23 +399,46 @@
   }
 
   async function refreshTasks() {
-    const data = await fetchJson("/api/tasks");
-    state.tasks = data.tasks || [];
-    if (!state.selectedTaskId && state.tasks.length) {
-      state.selectedTaskId = state.tasks[0].id;
+    if (state.refreshingTasks) return;
+    state.refreshingTasks = true;
+    try {
+      const data = await fetchJson("/api/tasks");
+      state.tasks = data.tasks || [];
+      if (!state.selectedTaskId && state.tasks.length) {
+        state.selectedTaskId = state.tasks[0].id;
+      }
+      if (state.selectedTaskId && !state.tasks.some((t) => t.id === state.selectedTaskId)) {
+        state.selectedTaskId = state.tasks[0] ? state.tasks[0].id : null;
+      }
+      renderTaskList();
+    } finally {
+      state.refreshingTasks = false;
     }
-    renderTaskList();
   }
 
   async function refreshDetail() {
     if (!state.selectedTaskId) {
+      if (consoleMetaEl) consoleMetaEl.textContent = "选择任务后显示输出";
       return;
     }
-    const taskData = await fetchJson(`/api/tasks/${state.selectedTaskId}`);
-    renderTaskDetail(taskData.task);
-    const logData = await fetchJson(`/api/tasks/${state.selectedTaskId}/logs?limit=250`);
-    consoleOutputEl.innerHTML = escapeHtml((logData.lines || []).join("\n"));
-    consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
+    if (state.refreshingDetail) return;
+    state.refreshingDetail = true;
+    try {
+      const taskData = await fetchJson(`/api/tasks/${state.selectedTaskId}`);
+      renderTaskDetail(taskData.task);
+      const logData = await fetchJson(`/api/tasks/${state.selectedTaskId}/logs?limit=250`);
+      const lines = logData.lines || [];
+      const nearBottom = consoleOutputEl.scrollHeight - consoleOutputEl.scrollTop - consoleOutputEl.clientHeight < 80;
+      consoleOutputEl.textContent = lines.join("\n") || "暂无日志";
+      if (nearBottom) {
+        consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
+      }
+      if (consoleMetaEl) {
+        consoleMetaEl.textContent = `最近 ${lines.length} 行 · 状态 ${taskData.task.status || "-"}`;
+      }
+    } finally {
+      state.refreshingDetail = false;
+    }
   }
 
   async function refreshAll() {
@@ -331,6 +452,8 @@
   }
 
   async function refreshHealth() {
+    if (state.refreshingHealth) return;
+    state.refreshingHealth = true;
     try {
       healthMetaEl.textContent = "检测中...";
       const data = await fetchJson("/api/health");
@@ -338,7 +461,13 @@
     } catch (error) {
       healthMetaEl.textContent = `检测失败: ${error.message}`;
       healthGridEl.innerHTML = '<div class="empty">健康检查失败</div>';
+    } finally {
+      state.refreshingHealth = false;
     }
+  }
+
+  function hasActiveTasks() {
+    return (state.tasks || []).some((task) => ACTIVE_STATUSES.has(String(task.status || "")));
   }
 
   formEl.addEventListener("submit", async (event) => {
@@ -376,9 +505,7 @@
   });
 
   stopBtnEl.addEventListener("click", async () => {
-    if (!state.selectedTaskId) {
-      return;
-    }
+    if (!state.selectedTaskId) return;
     try {
       await fetchJson(`/api/tasks/${state.selectedTaskId}/stop`, { method: "POST" });
       await refreshAll();
@@ -405,7 +532,6 @@
       api_endpoint: settingsFormEl.elements.api_endpoint.value.trim(),
       api_import_endpoint: (settingsFormEl.elements.api_import_endpoint?.value || "").trim(),
       api_admin_username: (settingsFormEl.elements.api_admin_username?.value || "admin").trim() || "admin",
-      // Empty password is treated by backend as "keep existing".
       api_admin_password: adminPasswordInput,
       api_token: settingsFormEl.elements.api_token.value.trim(),
       api_append: settingsFormEl.elements.api_append.checked,
@@ -439,19 +565,46 @@
     toggleAdvancedBtnEl.textContent = advancedFieldsEl.classList.contains("hidden") ? "高级设置" : "收起高级设置";
   });
 
-  toggleSettingsBtnEl.addEventListener("click", () => {
-    settingsFormEl.classList.toggle("hidden");
-    toggleSettingsBtnEl.textContent = settingsFormEl.classList.contains("hidden") ? "展开系统默认配置" : "收起系统默认配置";
-  });
+  function toggleSettings() {
+    setSettingsOpen(settingsFormEl.classList.contains("hidden"));
+  }
+  if (toggleSettingsBtnEl) toggleSettingsBtnEl.addEventListener("click", toggleSettings);
+  if (toggleSettingsHeadBtnEl) toggleSettingsHeadBtnEl.addEventListener("click", toggleSettings);
 
   toggleMailBtnEl.addEventListener("click", () => {
     detailMetaEl.classList.toggle("hidden");
-    toggleMailBtnEl.textContent = detailMetaEl.classList.contains("hidden") ? "展开临时邮箱参数" : "收起临时邮箱参数";
+    toggleMailBtnEl.textContent = detailMetaEl.classList.contains("hidden") ? "任务参数" : "收起参数";
   });
 
+  if (taskFiltersEl) {
+    taskFiltersEl.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-filter]");
+      if (!btn) return;
+      state.taskFilter = btn.dataset.filter || "all";
+      taskFiltersEl.querySelectorAll(".chip").forEach((chip) => {
+        chip.classList.toggle("active", chip === btn);
+      });
+      renderTaskList();
+    });
+  }
+
   setDefaults();
+  setSettingsOpen(false);
   refreshHealth();
   refreshAll();
-  window.setInterval(refreshAll, 2000);
-  window.setInterval(refreshHealth, 15000);
+
+  // Adaptive polling: task list every 3s; health 30s when active, 60s when idle.
+  window.setInterval(() => {
+    refreshAll();
+  }, 3000);
+  window.setInterval(() => {
+    if (hasActiveTasks()) {
+      refreshHealth();
+    }
+  }, 30000);
+  window.setInterval(() => {
+    if (!hasActiveTasks()) {
+      refreshHealth();
+    }
+  }, 60000);
 })();
