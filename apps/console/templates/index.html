@@ -7,6 +7,18 @@
   <link rel="stylesheet" href="{{ base_path }}/static/app.css{% if page_token %}?token={{ page_token }}{% endif %}">
 </head>
 <body>
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem("console_theme") || "";
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark");
+        else document.documentElement.setAttribute("data-theme", "light");
+      } catch (e) {}
+    })();
+  </script>
   <div id="app" class="shell">
     <header class="topbar">
       <div class="brand">
@@ -15,6 +27,7 @@
         <p>注册编排 · 入池统计 · 号池健康。任务在独立目录运行，不直接改生产代码。</p>
       </div>
       <div class="topbar-actions">
+        <button id="themeToggleBtn" class="button button-ghost" type="button" aria-pressed="false" title="切换亮/暗主题">暗色模式</button>
         <button id="refreshBtn" class="button button-ghost" type="button">刷新任务</button>
         <button id="healthRefreshBtn" class="button button-ghost" type="button">重新检测</button>
         <button id="toggleSettingsBtn" class="button button-secondary" type="button">系统设置</button>

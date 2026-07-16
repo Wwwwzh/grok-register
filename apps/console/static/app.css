@@ -958,3 +958,233 @@ body {
 .pool-trend-legend .web { color: #2857b5; }
 .pool-trend-legend .build { color: #2f7d48; }
 .pool-trend-legend .console { color: #8f5b00; }
+
+
+/* ===== Dark theme ===== */
+html[data-theme="dark"] {
+  --bg: #14110f;
+  --panel: #1d1916;
+  --panel-strong: #26211c;
+  --ink: #f4ebdf;
+  --muted: #b2a394;
+  --line: #3b322a;
+  --accent: #e06a4c;
+  --accent-dark: #f0a08c;
+  --success: #62c07f;
+  --warn: #e0b15a;
+  --danger: #ef7a66;
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
+}
+
+html[data-theme="dark"] body {
+  background:
+    radial-gradient(circle at top right, rgba(224, 106, 76, 0.16), transparent 30%),
+    radial-gradient(circle at top left, rgba(98, 192, 127, 0.08), transparent 24%),
+    linear-gradient(180deg, #171311 0%, #120f0d 100%);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .topbar {
+  background: linear-gradient(180deg, #0f0d0b 0%, #1a1512 100%);
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+html[data-theme="dark"] .overview-card,
+html[data-theme="dark"] .panel,
+html[data-theme="dark"] .health-card,
+html[data-theme="dark"] .task-card,
+html[data-theme="dark"] .summary-item,
+html[data-theme="dark"] .meta-item,
+html[data-theme="dark"] .preflight-box,
+html[data-theme="dark"] .pool-trend {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .overview-card {
+  background: rgba(38, 33, 28, 0.92);
+}
+
+html[data-theme="dark"] .health-card,
+html[data-theme="dark"] .task-card,
+html[data-theme="dark"] .summary-item,
+html[data-theme="dark"] .meta-item {
+  background: var(--panel-strong);
+}
+
+html[data-theme="dark"] .task-card.selected {
+  border-color: rgba(224, 106, 76, 0.55);
+  box-shadow: 0 0 0 1px rgba(224, 106, 76, 0.25), var(--shadow);
+}
+
+html[data-theme="dark"] .task-card.has-gap {
+  border-color: rgba(224, 177, 90, 0.45);
+}
+
+html[data-theme="dark"] .task-card.has-error {
+  border-color: rgba(239, 122, 102, 0.45);
+}
+
+html[data-theme="dark"] input,
+html[data-theme="dark"] select,
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] .task-search,
+html[data-theme="dark"] .template-row select {
+  background: #1a1613;
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+html[data-theme="dark"] input::placeholder,
+html[data-theme="dark"] textarea::placeholder {
+  color: #8d7f71;
+}
+
+html[data-theme="dark"] .button-secondary,
+html[data-theme="dark"] .button-ghost,
+html[data-theme="dark"] .chip {
+  background: #2a241f;
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+html[data-theme="dark"] .chip.active {
+  background: rgba(224, 106, 76, 0.22);
+  border-color: rgba(224, 106, 76, 0.45);
+  color: #ffd7cb;
+}
+
+html[data-theme="dark"] .console-output,
+html[data-theme="dark"] .console-wrap {
+  background: #0f0d0b;
+  color: #e8dccb;
+  border-color: var(--line);
+}
+
+html[data-theme="dark"] .console-head,
+html[data-theme="dark"] .console-meta {
+  color: var(--muted);
+}
+
+html[data-theme="dark"] .progress-track {
+  background: #2a241f;
+}
+
+html[data-theme="dark"] .task-error-line {
+  color: #ef9a8b;
+}
+
+html[data-theme="dark"] .task-gap-line {
+  color: #e0b15a;
+}
+
+html[data-theme="dark"] .error-type-pill {
+  background: #322a23;
+  color: #d8c7b4;
+}
+
+html[data-theme="dark"] .error-type-pill.top,
+html[data-theme="dark"] .error-type-pill.captcha {
+  background: rgba(224, 177, 90, 0.18);
+  color: #e0b15a;
+}
+
+html[data-theme="dark"] .error-type-pill.mail {
+  background: rgba(98, 192, 127, 0.16);
+  color: #62c07f;
+}
+
+html[data-theme="dark"] .error-type-pill.proxy {
+  background: rgba(90, 140, 230, 0.16);
+  color: #8bb1ff;
+}
+
+html[data-theme="dark"] .error-type-pill.import {
+  background: rgba(224, 177, 90, 0.16);
+  color: #e0b15a;
+}
+
+html[data-theme="dark"] .error-type-pill.xai {
+  background: rgba(170, 120, 230, 0.16);
+  color: #c7a0f0;
+}
+
+html[data-theme="dark"] .pool-trend {
+  background: linear-gradient(180deg, #221c18 0%, #1a1512 100%);
+}
+
+html[data-theme="dark"] .pool-trend-chart {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
+    repeating-linear-gradient(
+      to top,
+      rgba(255, 255, 255, 0.05) 0,
+      rgba(255, 255, 255, 0.05) 1px,
+      transparent 1px,
+      transparent 24px
+    );
+}
+
+html[data-theme="dark"] .status-queued,
+html[data-theme="dark"] .status-stopping {
+  background: rgba(224, 177, 90, 0.18);
+  color: #e0b15a;
+}
+
+html[data-theme="dark"] .status-running {
+  background: rgba(90, 140, 230, 0.18);
+  color: #8bb1ff;
+}
+
+html[data-theme="dark"] .status-completed {
+  background: rgba(98, 192, 127, 0.18);
+  color: #62c07f;
+}
+
+html[data-theme="dark"] .status-partial {
+  background: rgba(224, 177, 90, 0.18);
+  color: #e0b15a;
+}
+
+html[data-theme="dark"] .status-failed,
+html[data-theme="dark"] .status-stopped {
+  background: rgba(239, 122, 102, 0.18);
+  color: #ef9a8b;
+}
+
+html[data-theme="dark"] .form-message.error {
+  color: #ef9a8b;
+}
+
+html[data-theme="dark"] .form-message.success {
+  color: #62c07f;
+}
+
+html[data-theme="dark"] .preflight-box.ok {
+  border-color: rgba(98, 192, 127, 0.35);
+  background: rgba(98, 192, 127, 0.08);
+}
+
+html[data-theme="dark"] .preflight-box.bad {
+  border-color: rgba(239, 122, 102, 0.35);
+  background: rgba(239, 122, 102, 0.08);
+}
+
+html[data-theme="dark"] .summary-item.warn .meta-item-value,
+html[data-theme="dark"] .summary-item.danger .meta-item-value {
+  color: inherit;
+}
+
+html[data-theme="dark"] .summary-item.warn {
+  border-color: rgba(224, 177, 90, 0.35);
+}
+
+html[data-theme="dark"] .summary-item.danger {
+  border-color: rgba(239, 122, 102, 0.35);
+}
+
+html[data-theme="dark"] .empty {
+  color: var(--muted);
+}

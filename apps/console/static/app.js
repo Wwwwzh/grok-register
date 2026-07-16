@@ -47,6 +47,7 @@
   const poolTrendTitleEl = document.getElementById("poolTrendTitle");
   const poolTrendDeltaEl = document.getElementById("poolTrendDelta");
   const poolTrendChartEl = document.getElementById("poolTrendChart");
+  const themeToggleBtnEl = document.getElementById("themeToggleBtn");
   const overviewRunningEl = document.getElementById("overviewRunning");
   const overviewRunningHintEl = document.getElementById("overviewRunningHint");
   const overviewPoolTotalEl = document.getElementById("overviewPoolTotal");
@@ -123,6 +124,45 @@
     settingsFormEl.elements.api_token.value = defaults.api?.token || "";
     settingsFormEl.elements.api_append.checked = defaults.api?.append !== false;
     formEl.elements.api_append.checked = false;
+  }
+
+  const THEME_KEY = "console_theme";
+
+  function getPreferredTheme() {
+    try {
+      const saved = (localStorage.getItem(THEME_KEY) || "").trim();
+      if (saved === "dark" || saved === "light") return saved;
+    } catch (error) {}
+    try {
+      if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        return "dark";
+      }
+    } catch (error) {}
+    return "light";
+  }
+
+  function currentTheme() {
+    const attr = document.documentElement.getAttribute("data-theme");
+    return attr === "dark" ? "dark" : "light";
+  }
+
+  function applyTheme(theme, { persist = true } = {}) {
+    const next = theme === "dark" ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", next);
+    if (themeToggleBtnEl) {
+      themeToggleBtnEl.textContent = next === "dark" ? "亮色模式" : "暗色模式";
+      themeToggleBtnEl.setAttribute("aria-pressed", next === "dark" ? "true" : "false");
+      themeToggleBtnEl.title = next === "dark" ? "切换到亮色主题" : "切换到暗色主题";
+    }
+    if (persist) {
+      try {
+        localStorage.setItem(THEME_KEY, next);
+      } catch (error) {}
+    }
+  }
+
+  function toggleTheme() {
+    applyTheme(currentTheme() === "dark" ? "light" : "dark");
   }
 
   function statusClass(status) {
@@ -1118,6 +1158,11 @@
       }
     });
   }
+
+  if (themeToggleBtnEl) {
+    themeToggleBtnEl.addEventListener("click", toggleTheme);
+  }
+  applyTheme(getPreferredTheme(), { persist: false });
 
   setDefaults();
   setSettingsOpen(false);
