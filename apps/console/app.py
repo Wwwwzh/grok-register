@@ -59,6 +59,49 @@ def _normalize_root_path(value: str | None) -> str:
 
 ROOT_PATH = _normalize_root_path(os.getenv("GROK_REGISTER_CONSOLE_ROOT_PATH", ""))
 
+
+CONSOLE_AUTH_TOKEN = (os.getenv("GROK_REGISTER_CONSOLE_AUTH_TOKEN") or "").strip()
+CONSOLE_BASIC_USER = (os.getenv("GROK_REGISTER_CONSOLE_BASIC_USER") or "").strip()
+CONSOLE_BASIC_PASSWORD = (os.getenv("GROK_REGISTER_CONSOLE_BASIC_PASSWORD") or "").strip()
+
+
+def console_auth_enabled() -> bool:
+    return bool(CONSOLE_AUTH_TOKEN or (CONSOLE_BASIC_USER and CONSOLE_BASIC_PASSWORD))
+
+
+def require_console_auth(request: Request) -> None:
+    """Optional console gate: bearer token and/or basic auth from env."""
+    if not console_auth_enabled():
+        return
+
+    auth = (request.headers.get("authorization") or "").strip()
+    if CONSOLE_AUTH_TOKEN:
+        if auth.lower().startswith("bearer ") and auth[7:].strip() == CONSOLE_AUTH_TOKEN:
+            return
+        # Allow query token for quick browser use when only token auth is configured.
+        q = (request.query_params.get("token") or "").strip()
+        if q and q == CONSOLE_AUTH_TOKEN:
+            return
+
+    if CONSOLE_BASIC_USER and CONSOLE_BASIC_PASSWORD:
+        if auth.lower().startswith("basic "):
+            import base64
+
+            try:
+                raw = base64.b64decode(auth[6:].strip()).decode("utf-8", errors="ignore")
+                user, _, password = raw.partition(":")
+                if user == CONSOLE_BASIC_USER and password == CONSOLE_BASIC_PASSWORD:
+                    return
+            except Exception:
+                pass
+
+    # Challenge basic auth in browser when configured.
+    headers = {}
+    if CONSOLE_BASIC_USER and CONSOLE_BASIC_PASSWORD:
+        headers["WWW-Authenticate"] = 'Basic realm="Grok Register Console"'
+    raise HTTPException(status_code=401, detail="Unauthorized", headers=headers)
+
+
 PROJECT_FILES = ("DrissionPage_example.py", "email_register.py", "mint_and_push.py")
 PROJECT_DIRS = ("turnstilePatch",)
 
@@ -75,7 +118,14 @@ LINE_RE_SUCCESS = re.compile(r"注册成功\s*\|\s*email=([^|\s]+)")
 LINE_RE_ERROR = re.compile(r"\[Error\]\s*第\s*(\d+)\s*轮失败:\s*(.+)")
 LINE_RE_TEMP_EMAIL = re.compile(r"临时邮箱创建成功:\s*([^\s]+)")
 LINE_RE_FILLED_EMAIL = re.compile(r"已填写邮箱并点击注册:\s*([^\s]+)")
-LINE_RE_PUSH = re.compile(r"SSO token 已推送到 API")
+# Compatible with old and current sink push logs.
+LINE_RE_PUSH = re.compile(
+    r"(?:SSO token 已推送到 API|SSO 已推送到 grok2api|已推送到 grok2api|注册完成，推送\s*\d+\s*个 token 到 API)"
+)
+LINE_RE_PUSH_STATS = re.compile(
+    r"SSO 已推送到 grok2api（新增\s*(\d+)\s*，更新\s*(\d+)\s*，本轮\s*(\d+)\s*个）"
+)
+LINE_RE_PUSH_COUNT = re.compile(r"注册完成，推送\s*(\d+)\s*个 token 到 API")
 
 db_lock = threading.RLock()
 
@@ -299,6 +349,106 @@ def _build_health_item(
     }
 
 
+
+def _fetch_grok2api_pool_stats(defaults: dict[str, Any]) -> dict[str, Any]:
+    """Login to grok2api and summarize account pool counts."""
+    api_conf = dict(defaults.get("api") or {})
+    login_url = str(api_conf.get("endpoint") or "").strip()
+    import_url = str(api_conf.get("import_endpoint") or "").strip()
+    username = str(api_conf.get("admin_username") or "admin").strip() or "admin"
+    password = str(api_conf.get("admin_password") or "").strip()
+    if not login_url:
+        return {"ok": False, "summary": "未配置 login endpoint", "detail": "缺少 api.endpoint", "target": "-", "total": 0, "providers": {}}
+
+    try:
+        login_resp = requests.post(
+            login_url,
+            json={"username": username, "password": password},
+            timeout=15,
+            headers={"Content-Type": "application/json"},
+        )
+        if login_resp.status_code != 200:
+            return {
+                "ok": False,
+                "summary": f"登录失败 HTTP {login_resp.status_code}",
+                "detail": "admin login 未成功，无法读取号池。",
+                "target": login_url,
+                "total": 0,
+                "providers": {},
+            }
+        payload = login_resp.json()
+        token = (
+            ((payload.get("data") or {}).get("tokens") or {}).get("accessToken")
+            or payload.get("token")
+            or payload.get("access_token")
+        )
+        if not token:
+            return {
+                "ok": False,
+                "summary": "登录响应无 token",
+                "detail": "admin login 返回成功但没有 accessToken。",
+                "target": login_url,
+                "total": 0,
+                "providers": {},
+            }
+
+        headers = {"Authorization": f"Bearer {token}"}
+        # total
+        total_resp = requests.get(
+            login_url.rsplit("/api/admin/v1/", 1)[0] + "/api/admin/v1/accounts?page=1&pageSize=1",
+            headers=headers,
+            timeout=15,
+        )
+        total = 0
+        if total_resp.status_code == 200:
+            total = int((((total_resp.json().get("data") or {}).get("total")) or 0))
+
+        providers: dict[str, int] = {}
+        for provider in ("grok_web", "grok_build", "grok_console"):
+            base = login_url.rsplit("/api/admin/v1/", 1)[0]
+            resp = requests.get(
+                f"{base}/api/admin/v1/accounts?page=1&pageSize=1&provider={provider}",
+                headers=headers,
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                providers[provider] = int((((resp.json().get("data") or {}).get("total")) or 0))
+
+        # import endpoint reachability (empty body should be 400 invalidAuthFile)
+        import_ok = False
+        import_summary = "未配置 import"
+        if import_url:
+            try:
+                ireq = requests.post(import_url, headers={**headers, "Content-Type": "application/json"}, json={}, timeout=15)
+                import_ok = ireq.status_code in {200, 400, 401, 403, 422}
+                import_summary = f"import HTTP {ireq.status_code}"
+            except Exception as exc:
+                import_summary = f"import 不可达: {exc}"
+
+        parts = [f"total {total}"]
+        for k, v in providers.items():
+            parts.append(f"{k} {v}")
+        return {
+            "ok": True,
+            "summary": " | ".join(parts),
+            "detail": f"admin login 成功；{import_summary}。",
+            "target": import_url or login_url,
+            "total": total,
+            "providers": providers,
+            "import_ok": import_ok,
+            "import_summary": import_summary,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "summary": "号池统计失败",
+            "detail": str(exc),
+            "target": login_url,
+            "total": 0,
+            "providers": {},
+        }
+
+
 def run_health_checks() -> dict[str, Any]:
     defaults = merged_defaults()
     items: list[dict[str, Any]] = []
@@ -487,9 +637,27 @@ def run_health_checks() -> dict[str, Any]:
             )
         )
 
+    pool = _fetch_grok2api_pool_stats(defaults)
+    items.append(
+        _build_health_item(
+            "pool",
+            "Account Pool",
+            bool(pool.get("ok")),
+            str(pool.get("summary") or "-"),
+            str(pool.get("detail") or "-"),
+            str(pool.get("target") or "-"),
+        )
+    )
+
     return {
         "items": items,
         "checked_at": now_iso(),
+        "pool": {
+            "total": pool.get("total", 0),
+            "providers": pool.get("providers") or {},
+            "import_ok": pool.get("import_ok"),
+            "import_summary": pool.get("import_summary"),
+        },
     }
 
 
@@ -551,6 +719,10 @@ def read_settings() -> dict[str, Any]:
 
 def write_settings(settings: SystemSettings) -> dict[str, Any]:
     data = settings.model_dump()
+    previous = read_settings()
+    # Empty password means "keep existing" so UI can avoid echoing secrets.
+    if not str(data.get("api_admin_password") or "").strip():
+        data["api_admin_password"] = str(previous.get("api_admin_password") or "")
     data["max_concurrent_tasks"] = get_max_concurrent_tasks(data)
     execute(
         """
@@ -587,16 +759,20 @@ def merged_defaults() -> dict[str, Any]:
     api_base = dict(base.get("api") or {})
     if "api_endpoint" in saved:
         api_base["endpoint"] = str(saved.get("api_endpoint", ""))
-    if "api_token" in saved:
-        api_base["token"] = str(saved.get("api_token", ""))
+    if "api_token" in saved and str(saved.get("api_token") or "").strip():
+        api_base["token"] = str(saved.get("api_token", "")).strip()
+    elif "api_token" in saved and not str(saved.get("api_token") or "").strip():
+        # explicit empty means clear legacy token
+        api_base["token"] = ""
     if "api_append" in saved:
         api_base["append"] = bool(saved.get("api_append", True))
     if "api_import_endpoint" in saved:
         api_base["import_endpoint"] = str(saved.get("api_import_endpoint", ""))
     if "api_admin_username" in saved:
         api_base["admin_username"] = str(saved.get("api_admin_username", "admin"))
-    if "api_admin_password" in saved:
-        api_base["admin_password"] = str(saved.get("api_admin_password", ""))
+    # Only override env/default password when settings actually stores a non-empty value.
+    if str(saved.get("api_admin_password") or "").strip():
+        api_base["admin_password"] = str(saved.get("api_admin_password", "")).strip()
     # 再次兜底旧 token-sink endpoint。
     endpoint = str(api_base.get("endpoint", "") or "").strip()
     if endpoint.endswith("/v1/admin/tokens") or "/v1/admin/tokens" in endpoint:
@@ -681,7 +857,46 @@ def build_task_config(payload: TaskCreate) -> dict[str, Any]:
     }
 
 
+
+def public_defaults() -> dict[str, Any]:
+    """Defaults safe for browser bootstrap: mask secrets, keep configured flags."""
+    data = merged_defaults()
+    api = dict(data.get("api") or {})
+    admin_password = str(api.get("admin_password") or "")
+    api["admin_password_configured"] = bool(admin_password.strip())
+    api["admin_password"] = ""
+    if api.get("token"):
+        api["token_configured"] = True
+        # keep token visible only if already used as non-secret legacy field; still blank for safety
+        api["token"] = ""
+    else:
+        api["token_configured"] = False
+    data["api"] = api
+    if data.get("temp_mail_admin_password"):
+        data["temp_mail_admin_password_configured"] = True
+        data["temp_mail_admin_password"] = ""
+    if data.get("temp_mail_site_password"):
+        data["temp_mail_site_password_configured"] = True
+        data["temp_mail_site_password"] = ""
+    return data
+
+
 def serialize_task(row: sqlite3.Row) -> dict[str, Any]:
+    console_path = Path(row["console_path"]) if row["console_path"] else None
+    push = {
+        "pushed_count": 0,
+        "pushed_created": 0,
+        "pushed_updated": 0,
+        "push_events": 0,
+    }
+    if console_path is not None and console_path.exists():
+        parsed = parse_console_state(console_path)
+        push = {
+            "pushed_count": int(parsed.get("pushed_count") or 0),
+            "pushed_created": int(parsed.get("pushed_created") or 0),
+            "pushed_updated": int(parsed.get("pushed_updated") or 0),
+            "push_events": int(parsed.get("push_events") or 0),
+        }
     return {
         "id": int(row["id"]),
         "name": row["name"],
@@ -701,6 +916,7 @@ def serialize_task(row: sqlite3.Row) -> dict[str, Any]:
         "finished_at": row["finished_at"],
         "exit_code": row["exit_code"],
         "pid": row["pid"],
+        **push,
     }
 
 
@@ -720,6 +936,10 @@ def parse_console_state(console_path: Path) -> dict[str, Any]:
         "last_email": "",
         "last_error": "",
         "last_log_at": now_iso(),
+        "pushed_count": 0,
+        "pushed_created": 0,
+        "pushed_updated": 0,
+        "push_events": 0,
     }
     if not console_path.exists():
         return state
@@ -740,6 +960,8 @@ def parse_console_state(console_path: Path) -> dict[str, Any]:
         "注册成功",
         "[Error]",
         "已推送到 API",
+        "已推送到 grok2api",
+        "推送",
     )
 
     for raw_line in lines:
@@ -771,7 +993,23 @@ def parse_console_state(console_path: Path) -> dict[str, Any]:
             state["current_phase"] = "turnstile_solved"
         if "已填写注册资料并点击完成注册" in line:
             state["current_phase"] = "submitting_profile"
-        if LINE_RE_PUSH.search(line):
+        if m := LINE_RE_PUSH_STATS.search(line):
+            created = int(m.group(1))
+            updated = int(m.group(2))
+            total = int(m.group(3))
+            state["pushed_created"] += created
+            state["pushed_updated"] += updated
+            state["pushed_count"] += total
+            state["push_events"] += 1
+            state["current_phase"] = "pushed_to_api"
+        elif m := LINE_RE_PUSH_COUNT.search(line):
+            state["pushed_count"] += int(m.group(1))
+            state["push_events"] += 1
+            state["current_phase"] = "pushed_to_api"
+        elif LINE_RE_PUSH.search(line):
+            # Fallback for older log formats without counts.
+            state["push_events"] += 1
+            state["pushed_count"] = max(state["pushed_count"], state["completed_count"])
             state["current_phase"] = "pushed_to_api"
         if any(token in line for token in interesting):
             state["last_log_at"] = now_iso()
@@ -1000,6 +1238,21 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Grok Register Console", lifespan=lifespan, root_path=ROOT_PATH)
+
+@app.middleware("http")
+async def console_auth_middleware(request: Request, call_next):
+    try:
+        require_console_auth(request)
+    except HTTPException as exc:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None) or {},
+        )
+    return await call_next(request)
+
 STATIC_DIR = APP_DIR / "static"
 
 
@@ -1019,7 +1272,7 @@ def index(request: Request) -> HTMLResponse:
         "index.html",
         {
             "request": request,
-            "defaults": json.dumps(merged_defaults(), ensure_ascii=False),
+            "defaults": json.dumps(public_defaults(), ensure_ascii=False),
             "max_concurrent_tasks": get_max_concurrent_tasks(),
             "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,
             "source_project": str(SOURCE_PROJECT),
@@ -1030,13 +1283,22 @@ def index(request: Request) -> HTMLResponse:
 
 @app.get("/api/meta")
 def api_meta() -> dict[str, Any]:
+    settings = read_settings()
+    safe_settings = dict(settings)
+    if safe_settings.get("api_admin_password"):
+        safe_settings["api_admin_password"] = ""
+        safe_settings["api_admin_password_configured"] = True
+    if safe_settings.get("api_token"):
+        safe_settings["api_token"] = ""
+        safe_settings["api_token_configured"] = True
     return {
-        "defaults": merged_defaults(),
-        "settings": read_settings(),
+        "defaults": public_defaults(),
+        "settings": safe_settings,
         "source_project": str(SOURCE_PROJECT),
         "python_path": str(SOURCE_VENV_PYTHON),
         "max_concurrent_tasks": get_max_concurrent_tasks(),
         "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,
+        "auth_enabled": console_auth_enabled(),
     }
 
 
@@ -1047,15 +1309,30 @@ def api_health() -> dict[str, Any]:
 
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
-    return {"settings": read_settings(), "defaults": merged_defaults()}
+    settings = read_settings()
+    safe_settings = dict(settings)
+    if safe_settings.get("api_admin_password"):
+        safe_settings["api_admin_password"] = ""
+        safe_settings["api_admin_password_configured"] = True
+    if safe_settings.get("api_token"):
+        safe_settings["api_token"] = ""
+        safe_settings["api_token_configured"] = True
+    return {"settings": safe_settings, "defaults": public_defaults()}
 
 
 @app.post("/api/settings")
 def save_settings(payload: SystemSettings) -> dict[str, Any]:
     saved = write_settings(payload)
-    defaults = merged_defaults()
+    defaults = public_defaults()
+    safe_settings = dict(saved)
+    if safe_settings.get("api_admin_password"):
+        safe_settings["api_admin_password"] = ""
+        safe_settings["api_admin_password_configured"] = True
+    if safe_settings.get("api_token"):
+        safe_settings["api_token"] = ""
+        safe_settings["api_token_configured"] = True
     return {
-        "settings": saved,
+        "settings": safe_settings,
         "defaults": defaults,
         "max_concurrent_tasks": defaults.get("max_concurrent_tasks", get_max_concurrent_tasks()),
         "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,

@@ -26,6 +26,10 @@
   const healthGridEl = document.getElementById("healthGrid");
   const healthMetaEl = document.getElementById("healthMeta");
 
+  function boolish(value) {
+    return value === true || value === 1 || value === "1" || value === "true";
+  }
+
   function escapeHtml(value) {
     return String(value || "")
       .replaceAll("&", "&amp;")
@@ -55,6 +59,20 @@
     settingsFormEl.elements.temp_mail_domain.value = defaults.temp_mail_domain || "";
     settingsFormEl.elements.temp_mail_site_password.value = defaults.temp_mail_site_password || "";
     settingsFormEl.elements.api_endpoint.value = defaults.api?.endpoint || "";
+    if (settingsFormEl.elements.api_import_endpoint) {
+      settingsFormEl.elements.api_import_endpoint.value = defaults.api?.import_endpoint || "";
+    }
+    if (settingsFormEl.elements.api_admin_username) {
+      settingsFormEl.elements.api_admin_username.value = defaults.api?.admin_username || "admin";
+    }
+    // Never prefill password into the form; empty means "keep existing" on save.
+    if (settingsFormEl.elements.api_admin_password) {
+      settingsFormEl.elements.api_admin_password.value = "";
+      const configured = boolish(defaults.api?.admin_password_configured || defaults.api?.admin_password);
+      settingsFormEl.elements.api_admin_password.placeholder = configured
+        ? "已配置（留空保存则沿用）"
+        : "未配置";
+    }
     settingsFormEl.elements.api_token.value = defaults.api?.token || "";
     settingsFormEl.elements.api_append.checked = defaults.api?.append !== false;
     formEl.elements.api_append.checked = false;
@@ -100,7 +118,7 @@
           <strong title="${escapeHtml(task.name)}">#${task.id} ${escapeHtml(task.name)}</strong>
           <span class="${statusClass(task.status)}">${escapeHtml(task.status)}</span>
         </div>
-        <div class="task-subrow">执行次数 ${task.target_count}</div>
+        <div class="task-subrow">目标 ${task.target_count} · 成功 ${task.completed_count || 0} · 入池 ${task.pushed_count || 0} · 失败 ${task.failed_count || 0}</div>
         <div class="task-actions">
           <span class="task-action-hint">点击查看日志</span>
           <button class="button button-danger button-small" type="button" data-delete-task-id="${task.id}">删除</button>
@@ -148,6 +166,8 @@
       ["状态", task.status],
       ["目标次数", task.target_count],
       ["成功数", task.completed_count],
+      ["入池数", task.pushed_count || 0],
+      ["新增/更新", `${task.pushed_created || 0}/${task.pushed_updated || 0}`],
       ["失败数", task.failed_count],
       ["当前轮次", task.current_round],
       ["当前阶段", task.current_phase || "-"],
@@ -180,11 +200,41 @@
     `).join("");
   }
 
+  function getAuthToken() {
+    try {
+      const params = new URLSearchParams(window.location.search || "");
+      const fromQuery = (params.get("token") || "").trim();
+      if (fromQuery) {
+        sessionStorage.setItem("console_auth_token", fromQuery);
+        return fromQuery;
+      }
+      return (sessionStorage.getItem("console_auth_token") || "").trim();
+    } catch (error) {
+      return "";
+    }
+  }
+
   async function fetchJson(url, options) {
-    const response = await fetch(apiUrl(url), options);
-    const data = await response.json();
+    const opts = { ...(options || {}) };
+    const headers = new Headers(opts.headers || {});
+    const token = getAuthToken();
+    if (token && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    opts.headers = headers;
+    const response = await fetch(apiUrl(url), opts);
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = {};
+    }
     if (!response.ok) {
-      throw new Error(data.detail || "Request failed");
+      const detail = data.detail;
+      const message = typeof detail === "string"
+        ? detail
+        : (Array.isArray(detail) ? detail.map((x) => x.msg || JSON.stringify(x)).join("; ") : "Request failed");
+      throw new Error(message || `HTTP ${response.status}`);
     }
     return data;
   }
@@ -242,6 +292,9 @@
       temp_mail_domain: formEl.elements.temp_mail_domain.value.trim() || null,
       temp_mail_site_password: formEl.elements.temp_mail_site_password.value.trim() || null,
       api_endpoint: formEl.elements.api_endpoint.value.trim() || null,
+      api_import_endpoint: (formEl.elements.api_import_endpoint?.value || "").trim() || null,
+      api_admin_username: (formEl.elements.api_admin_username?.value || "").trim() || null,
+      api_admin_password: (formEl.elements.api_admin_password?.value || "").trim() || null,
       api_token: formEl.elements.api_token.value.trim() || null,
       api_append: formEl.elements.api_append.checked ? true : null,
     };
@@ -280,6 +333,7 @@
   settingsFormEl.addEventListener("submit", async (event) => {
     event.preventDefault();
     const concurrentRaw = Number(settingsFormEl.elements.max_concurrent_tasks?.value || 1);
+    const adminPasswordInput = (settingsFormEl.elements.api_admin_password?.value || "").trim();
     const payload = {
       proxy: settingsFormEl.elements.proxy.value.trim(),
       browser_proxy: settingsFormEl.elements.browser_proxy.value.trim(),
@@ -288,6 +342,10 @@
       temp_mail_domain: settingsFormEl.elements.temp_mail_domain.value.trim(),
       temp_mail_site_password: settingsFormEl.elements.temp_mail_site_password.value.trim(),
       api_endpoint: settingsFormEl.elements.api_endpoint.value.trim(),
+      api_import_endpoint: (settingsFormEl.elements.api_import_endpoint?.value || "").trim(),
+      api_admin_username: (settingsFormEl.elements.api_admin_username?.value || "admin").trim() || "admin",
+      // Empty password is treated by backend as "keep existing".
+      api_admin_password: adminPasswordInput,
       api_token: settingsFormEl.elements.api_token.value.trim(),
       api_append: settingsFormEl.elements.api_append.checked,
       max_concurrent_tasks: Number.isFinite(concurrentRaw) ? concurrentRaw : 1,

@@ -74,14 +74,29 @@
             <input name="temp_mail_site_password" placeholder="optional">
           </label>
           <label>
-            <span>Token 上传接口</span>
-            <small>注册成功后，SSO token 推送到哪个接口。</small>
-            <input name="api_endpoint" placeholder="http://127.0.0.1:8000/v1/admin/tokens">
+            <span>Admin Login 接口</span>
+            <small>grok2api 管理登录地址，用于鉴权与号池统计。</small>
+            <input name="api_endpoint" placeholder="http://172.18.0.1:8000/api/admin/v1/auth/login">
           </label>
           <label>
-            <span>API Token</span>
-            <small>推送 token 到下游接口时使用的管理口令。</small>
-            <input name="api_token" placeholder="bearer token">
+            <span>Import 接口</span>
+            <small>注册成功后 SSO 入池地址。</small>
+            <input name="api_import_endpoint" placeholder="http://172.18.0.1:8000/api/admin/v1/accounts/web/import">
+          </label>
+          <label>
+            <span>Admin 用户名</span>
+            <small>grok2api 管理后台用户名。</small>
+            <input name="api_admin_username" placeholder="admin">
+          </label>
+          <label>
+            <span>Admin 密码</span>
+            <small>grok2api 管理后台密码。留空保存表示沿用已有密码。</small>
+            <input name="api_admin_password" type="password" placeholder="留空则沿用已有密码" autocomplete="new-password">
+          </label>
+          <label>
+            <span>API Token（兼容旧字段）</span>
+            <small>旧 token-sink 用；新 grok2api 可留空。</small>
+            <input name="api_token" placeholder="optional legacy token">
           </label>
           <label class="checkbox-row">
             <input name="api_append" type="checkbox" checked>
@@ -99,7 +114,7 @@
           <div>
             <div class="eyebrow">Health Check</div>
             <h2>环境健康检查</h2>
-            <p class="panel-desc">启动后直接检查 `warp / grok2api / temp mail / x.ai` 四段是否可达。这里使用当前系统默认配置做连通性探测。</p>
+            <p class="panel-desc">检查 `warp / grok2api / temp mail / x.ai / 号池数量`。使用当前系统默认配置做连通性与号池探测。</p>
           </div>
           <button id="healthRefreshBtn" class="button button-secondary" type="button">重新检测</button>
         </div>
@@ -163,13 +178,28 @@
               <input name="temp_mail_site_password" placeholder="留空则用系统默认">
             </label>
             <label>
-              <span>Token 上传接口覆盖</span>
-              <small>当前任务把 token 推到另一套服务时再填。</small>
+              <span>Admin Login 接口覆盖</span>
+              <small>当前任务临时改 login 地址时再填。</small>
               <input name="api_endpoint" placeholder="留空则用系统默认">
             </label>
             <label>
-              <span>API Token 覆盖</span>
-              <small>当前任务临时改管理口令时再填。</small>
+              <span>Import 接口覆盖</span>
+              <small>当前任务临时改入池地址时再填。</small>
+              <input name="api_import_endpoint" placeholder="留空则用系统默认">
+            </label>
+            <label>
+              <span>Admin 用户名覆盖</span>
+              <small>当前任务临时改管理用户名时再填。</small>
+              <input name="api_admin_username" placeholder="留空则用系统默认">
+            </label>
+            <label>
+              <span>Admin 密码覆盖</span>
+              <small>当前任务临时改管理密码时再填。</small>
+              <input name="api_admin_password" type="password" placeholder="留空则用系统默认" autocomplete="new-password">
+            </label>
+            <label>
+              <span>API Token 覆盖（兼容）</span>
+              <small>旧 token-sink 兼容字段，通常可留空。</small>
               <input name="api_token" placeholder="留空则用系统默认">
             </label>
             <label class="checkbox-row">
