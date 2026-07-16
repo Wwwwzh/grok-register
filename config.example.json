@@ -1,16 +1,23 @@
 {
-    "run": {
-        "count": 50
-    },
-    "temp_mail_api_base": "https://mail-api.example.com",
-    "temp_mail_admin_password": "<your_admin_password>",
-    "temp_mail_domain": "mail.example.com",
-    "temp_mail_site_password": "",
-    "proxy": "",
-    "browser_proxy": "",
-    "api": {
-        "endpoint": "http://127.0.0.1:8000/v1/admin/tokens",
-        "token": "",
-        "append": true
-    }
+  "run": {
+    "count": 50
+  },
+  "temp_mail_api_base": "https://mail-api.example.com",
+  "temp_mail_admin_password": "<your_admin_password>",
+  "temp_mail_domain": "mail.example.com",
+  "temp_mail_site_password": "",
+  "proxy": "",
+  "browser_proxy": "",
+  "api": {
+    "endpoint": "http://172.18.0.1:8000/api/admin/v1/auth/login",
+    "import_endpoint": "http://172.18.0.1:8000/api/admin/v1/accounts/web/import",
+    "admin_username": "admin",
+    "admin_password": "admin123",
+    "append": true
+  },
+  "cpa_enabled": false,
+  "cpa_local_dir": "./output/cpa_auths",
+  "cpa_proxy": "",
+  "cliproxy_push_enabled": true,
+  "cliproxy_auth_dir": "/cliproxy-auths"
 }

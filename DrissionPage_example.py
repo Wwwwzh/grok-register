@@ -10,6 +10,20 @@ import os
 import secrets
 import sys
 
+# 任务目录启动时 cwd 可能不是仓库根；保证能 import 根目录下的 xconsole_client。
+_REPO_CANDIDATES = [
+    os.environ.get("GROK_REGISTER_SOURCE_DIR", "").strip(),
+    os.path.dirname(os.path.abspath(__file__)),
+    os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..")),
+    "/workspace",
+]
+for _repo in _REPO_CANDIDATES:
+    if not _repo:
+        continue
+    if os.path.isdir(os.path.join(_repo, "xconsole_client")) and _repo not in sys.path:
+        sys.path.insert(0, _repo)
+        break
+
 from email_register import get_email_and_token, get_oai_code
 
 
@@ -84,7 +98,7 @@ if not os.environ.get("DISPLAY") or os.environ.get("USE_XVFB") == "1":
         print(f"[Warn] Xvfb 启动失败: {e}，将尝试直接运行")
 
 co = ChromiumOptions()
-co.auto_port()
+# auto_port() moved inside start_browser() to run after set_user_data_path()
 co.set_argument("--no-sandbox")
 co.set_argument("--disable-gpu")
 co.set_argument("--disable-dev-shm-usage")
@@ -111,7 +125,66 @@ if _browser_proxy:
 import platform
 import shutil
 import glob as _glob_mod
+from mint_and_push import mint_cpa_json, save_cpa_json, push_to_cliproxy
 _linux_browser_path = ""
+def mint_cpa_build_oauth(sso, proxy=None):
+    """
+    用 SSO token 执行 CPA mint + build oauth 流程。
+    返回 auth dict 或 None。
+    """
+    import requests
+    import urllib3
+    urllib3.disable_warnings()
+
+    cookies = {"sso": sso}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    try:
+        # 步骤1: mint - 获取 build token
+        resp = requests.post(
+            "https://grok.com/rest/app/mint",
+            cookies=cookies,
+            headers=headers,
+            timeout=30,
+            proxies=proxies,
+            verify=False,
+        )
+        if resp.status_code != 200:
+            print(f"  [Mint] HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        mint_data = resp.json()
+        build_token = mint_data.get("buildToken") or mint_data.get("token", "")
+        if not build_token:
+            print(f"  [Mint] 无 buildToken")
+            return None
+
+        # 步骤2: build OAuth
+        resp2 = requests.post(
+            "https://grok.com/rest/build/oauth",
+            json={"token": build_token},
+            headers=headers,
+            timeout=30,
+            proxies=proxies,
+            verify=False,
+        )
+        if resp2.status_code != 200:
+            print(f"  [OAuth] HTTP {resp2.status_code}: {resp2.text[:200]}")
+            return None
+
+        oauth_data = resp2.json()
+        email = oauth_data.get("email", "unknown")
+        return {"email": email, **oauth_data}
+
+    except Exception as e:
+        print(f"  mint_cpa_build_oauth 异常: {e}")
+        return None
+
 if platform.system() == "Linux":
     # 优先用 playwright 装的 chromium（无 AppArmor 限制）
     _pw_chromes = _glob_mod.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome"))
@@ -155,6 +228,7 @@ def start_browser():
         )
     _chrome_temp_dir = tempfile.mkdtemp(prefix="chrome_run_")
     co.set_user_data_path(_chrome_temp_dir)
+    co.auto_port()
     browser = Chromium(co)
     tabs = browser.get_tabs()
     page = tabs[-1] if tabs else browser.new_tab()
@@ -187,8 +261,10 @@ def restart_browser():
         page = tabs[-1] if tabs else browser.new_tab()
         page.run_js("window.localStorage.clear(); window.sessionStorage.clear();")
         page.clear_cache(session_storage=True, cookies=True)
-    except Exception:
+    except Exception as e:
+        print(f"[Warn] restart_browser 轻量重启失败: {e}，执行完整重启。")
         stop_browser()
+        time.sleep(5)
         start_browser()
 
 
@@ -1072,16 +1148,30 @@ def append_sso_to_txt(sso_value, output_path=DEFAULT_SSO_FILE):
     print(f"[*] 已追加写入 sso 到文件: {output_path}")
 
 
-def push_sso_to_api(new_tokens: list):
-    # 推送 SSO token 到 grok2api 管理接口。
-    # append=false：直接将本次 token 列表全量推送（覆盖）。
-    # append=true（默认）：先 GET 查询线上现有 token，合并本次后全量推送。
+def get_config_value(key, default=None):
+    """从 config.json 读取单个配置值，不存在时返回 default。"""
     import json
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            conf = json.load(f)
+        return conf.get(key, default)
+    except Exception:
+        return default
+
+
+def push_sso_to_api(new_tokens: list):
+    # 推送 SSO token 到 grok2api (Go 版) 管理接口
+    # POST /api/admin/v1/auth/login      登录获取 JWT
+    # POST /api/admin/v1/accounts/web/import  导入 SSO（纯文本逐行）
+    import json
+    import tempfile
+    import os as _os
     import urllib3
     import requests
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    config_path = _os.path.join(_os.path.dirname(__file__), "config.json")
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             conf = json.load(f)
@@ -1090,65 +1180,78 @@ def push_sso_to_api(new_tokens: list):
         return
 
     api_conf = conf.get("api", {})
-    endpoint = str(api_conf.get("endpoint", "")).strip()
-    api_token = str(api_conf.get("token", "")).strip()
+    login_endpoint = str(api_conf.get("endpoint", "")).strip()
+    import_endpoint = str(api_conf.get("import_endpoint", "")).strip()
+    admin_username = str(api_conf.get("admin_username", "admin")).strip()
+    admin_password = str(api_conf.get("admin_password", "")).strip()
     append_mode = api_conf.get("append", True)
 
-    if not endpoint or not api_token:
+    if not login_endpoint or not admin_password:
         return
-
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
+    if not import_endpoint:
+        import_endpoint = login_endpoint.replace("/auth/login", "/accounts/web/import")
 
     tokens_to_push = [t for t in new_tokens if t]
+    if not tokens_to_push:
+        return
 
-    if append_mode:
-        try:
-            get_resp = requests.get(endpoint, headers=headers, timeout=15, verify=False)
-            if get_resp.status_code == 200:
-                data = get_resp.json()
-                # 兼容两种响应格式：
-                # 新版: {"tokens": {"ssoBasic": [...]}}
-                # 旧版: {"ssoBasic": [...]}
-                if isinstance(data, dict) and isinstance(data.get("tokens"), dict):
-                    existing = data["tokens"].get("ssoBasic", [])
-                else:
-                    existing = data.get("ssoBasic", []) if isinstance(data, dict) else []
-                existing_tokens = [
-                    item["token"] if isinstance(item, dict) else str(item)
-                    for item in existing if item
-                ]
-                seen = set()
-                deduped = []
-                for t in existing_tokens + tokens_to_push:
-                    if t not in seen:
-                        seen.add(t)
-                        deduped.append(t)
-                tokens_to_push = deduped
-                print(f"[*] 查询到线上 {len(existing_tokens)} 个 token，合并本次 {len(new_tokens)} 个，共 {len(deduped)} 个")
-            else:
-                print(f"[Error] 查询线上 token 失败: HTTP {get_resp.status_code}，放弃推送以保护存量数据")
-                return
-        except Exception as e:
-            print(f"[Error] 查询线上 token 异常: {e}，放弃推送以保护存量数据")
-            return
-
+    # 1. 登录获取 JWT
     try:
-        resp = requests.post(
-            endpoint,
-            json={"ssoBasic": tokens_to_push},
-            headers=headers,
-            timeout=60,
+        login_resp = requests.post(
+            login_endpoint,
+            json={"username": admin_username, "password": admin_password},
+            headers={"Content-Type": "application/json"},
+            timeout=15,
             verify=False,
         )
-        if resp.status_code == 200:
-            print(f"[*] SSO token 已推送到 API（共 {len(tokens_to_push)} 个）: {endpoint}")
-        else:
-            print(f"[Warn] 推送 API 返回异常: HTTP {resp.status_code} {resp.text[:200]}")
+        if login_resp.status_code != 200:
+            print(f"[Warn] grok2api 登录失败: HTTP {login_resp.status_code} {login_resp.text[:200]}")
+            return
+        jwt = login_resp.json().get("data", {}).get("tokens", {}).get("accessToken", "")
+        if not jwt:
+            print(f"[Warn] grok2api 登录响应无 accessToken")
+            return
     except Exception as e:
-        print(f"[Warn] 推送 API 失败: {e}")
+        print(f"[Warn] grok2api 登录异常: {e}")
+        return
+
+    # 2. 纯文本 SSO -> multipart 上传导入
+    sso_text = "\n".join(tokens_to_push)
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="grok_sso_")
+        _os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(sso_text)
+        with open(tmp_path, "rb") as f:
+            resp = requests.post(
+                import_endpoint,
+                headers={"Authorization": f"Bearer {jwt}"},
+                files={"files": ("grok-web-sso-tokens.txt", f, "text/plain")},
+                timeout=120,
+                verify=False,
+            )
+        if resp.status_code == 200:
+            created, updated = 0, 0
+            for line in resp.text.split("\n"):
+                if line.startswith("data: ") and '"created"' in line:
+                    try:
+                        d = json.loads(line[6:])
+                        created = d.get("created", 0)
+                        updated = d.get("updated", 0)
+                    except Exception:
+                        pass
+            print(f"[*] SSO 已推送到 grok2api（新增 {created}，更新 {updated}，本轮 {len(tokens_to_push)} 个）")
+        else:
+            print(f"[Warn] grok2api 导入失败: HTTP {resp.status_code} {resp.text[:300]}")
+    except Exception as e:
+        print(f"[Warn] grok2api 导入异常: {e}")
+    finally:
+        if tmp_path and _os.path.exists(tmp_path):
+            try:
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 def run_single_registration(output_path=DEFAULT_SSO_FILE, extract_numbers=False):
@@ -1223,8 +1326,26 @@ def main():
             round_succeeded = False
 
             try:
-                result = run_single_registration(args.output, extract_numbers=args.extract_numbers)
-                collected_sso.append(result["sso"])
+                import threading as _thr
+                _result = [None]
+                _error = [None]
+                def _runner():
+                    try:
+                        _result[0] = run_single_registration(args.output, extract_numbers=args.extract_numbers)
+                    except Exception as ex:
+                        _error[0] = ex
+                _t = _thr.Thread(target=_runner, daemon=True)
+                _t.start()
+                _t.join(timeout=300)
+                if _t.is_alive():
+                    print(f"[Warn] 第 {current_round} 轮超时(5分钟)，强制重启浏览器继续下一轮。")
+                    stop_browser()
+                    time.sleep(3)
+                    _t.join(timeout=5)
+                    continue
+                if _error[0]:
+                    raise _error[0]
+                collected_sso.append(_result[0]["sso"])
                 round_succeeded = True
             except KeyboardInterrupt:
                 print("\n[Info] 收到中断信号，停止后续轮次。")
@@ -1238,9 +1359,99 @@ def main():
                 time.sleep(2)
 
     finally:
+        # 推送 SSO 到 grok2api
         if collected_sso:
+            # --- Build OAuth（纯协议，复用浏览器 cookies，不含 Turnstile 收费）---
+            if collected_sso:
+                import json as _j, base64 as _b64
+                print(f"\n[*] 开始 Build OAuth，共 {len(collected_sso)} 个账号...")
+                cliproxy_dir = get_config_value("cliproxy_auth_dir", "/cliproxy-auths")
+                build_ok = 0
+                from xconsole_client.xai_oauth import complete_build_oauth
+                for _idx, _sso in enumerate(collected_sso):
+                    try:
+                        _raw = page.cookies(all_domains=True, all_info=True) or []
+                        _cookies = {}
+                        for _item in _raw:
+                            if isinstance(_item, dict):
+                                _n = str(_item.get("name", "")).strip()
+                                _v = str(_item.get("value", "")).strip()
+                            else:
+                                _n = str(getattr(_item, "name", "")).strip()
+                                _v = str(getattr(_item, "value", "")).strip()
+                            if _n and _v:
+                                _cookies[_n] = _v
+                        _cookies["sso"] = _sso
+                        _email = ""
+                        try:
+                            _payload = _j.loads(_b64.urlsafe_b64decode(_sso.split(".")[1] + "=="))
+                            _email = _payload.get("email", "")
+                        except Exception:
+                            pass
+                        _oa = complete_build_oauth(
+                            _email or f"account_{_idx}@grok",
+                            "",
+                            protocol=True,
+                            debug=False,
+                            session_cookies=_cookies,
+                            cliproxyapi_auth_dir=cliproxy_dir,
+                            timeout=120,
+                            headless=True,
+                            interactive_fallback=False,
+                        )
+                        if _oa and _oa.access_token:
+                            build_ok += 1
+                            print(f"  [{_idx+1}/{len(collected_sso)}] Build OAuth 成功: {_oa.email or _email}")
+                            if _oa.cliproxyapi_path:
+                                print(f"    -> CLIProxyAPI auth: {_oa.cliproxyapi_path}")
+                            # 备份一份到 workspace/output/auth，方便人工排查
+                            try:
+                                import shutil as _sh
+                                from pathlib import Path as _P
+                                _src = _P(str(_oa.cliproxyapi_path))
+                                _bak = _P("/workspace/output/auth") / _src.name
+                                _bak.parent.mkdir(parents=True, exist_ok=True)
+                                if _src.exists() and _src.resolve() != _bak.resolve():
+                                    _sh.copy2(_src, _bak)
+                                    print(f"    -> backup: {_bak}")
+                            except Exception as _be2:
+                                print(f"    -> backup skipped: {_be2}")
+                        else:
+                            print(f"  [{_idx+1}/{len(collected_sso)}] Build OAuth 失败: 无 token")
+                    except Exception as _be:
+                        print(f"  [{_idx+1}/{len(collected_sso)}] Build OAuth 异常: {_be}")
+                print(f"[*] Build OAuth 完成: {build_ok}/{len(collected_sso)} 成功，auth 文件目录: {cliproxy_dir}")
+            # --- end Build OAuth ---
+            
             print(f"\n[*] 注册完成，推送 {len(collected_sso)} 个 token 到 API...")
             push_sso_to_api(collected_sso)
+
+        # 旧 CPA mint（grok.com/rest/app/mint）已 404；默认关闭。
+        # Build OAuth 已写出 CLIProxyAPI auth JSON，无需再走 CPA mint。
+        if collected_sso:
+            cpa_enabled = get_config_value("cpa_enabled", False)
+            if not cpa_enabled:
+                print("[*] CPA mint 已跳过（cpa_enabled=false；Build OAuth 已覆盖）")
+            else:
+                print(f"\n[*] 开始 CPA mint，共 {len(collected_sso)} 个账号...")
+                cpa_proxy = get_config_value("cpa_proxy", "")
+                cliproxy_auth_dir = get_config_value("cliproxy_auth_dir", "/workspace/output/auth")
+                cpa_local_dir = get_config_value("cpa_local_dir", "./output/cpa_auths")
+                cliproxy_push_enabled = get_config_value("cliproxy_push_enabled", True)
+                success = 0
+                for sso in collected_sso:
+                    if not sso:
+                        continue
+                    try:
+                        auth_obj, _ = mint_cpa_json(sso, proxy=cpa_proxy if cpa_proxy else None)
+                        if auth_obj:
+                            save_cpa_json(auth_obj, cpa_local_dir)
+                            if cliproxy_push_enabled:
+                                push_to_cliproxy(auth_obj, cliproxy_auth_dir)
+                            success += 1
+                    except Exception as e:
+                        print(f"[CPA] 处理 SSO 失败: {e}")
+                print(f"[*] CPA mint 完成: {success}/{len(collected_sso)} 成功")
 
         stop_browser()
 

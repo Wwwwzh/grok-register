@@ -7,7 +7,7 @@ services:
     cap_add:
       - NET_ADMIN
     ports:
-      - "127.0.0.1:1080:1080"
+      - "127.0.0.1:1081:1080"
 
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -16,7 +16,10 @@ services:
     depends_on:
       - warp
 
+  # 默认不启动：宿主机已有 host-network 的 grok2api 占用 8000。
+  # 需要 compose 内置版时：docker compose --profile local-grok2api up -d grok2api
   grok2api:
+    profiles: ["local-grok2api"]
     build:
       context: ./vendor/grok2api
       dockerfile: Dockerfile
@@ -31,7 +34,7 @@ services:
       CF_REFRESH_INTERVAL: ${CF_REFRESH_INTERVAL:-600}
       CF_TIMEOUT: ${CF_TIMEOUT:-60}
     ports:
-      - "${GROK2API_HOST_PORT:-8000}:8000"
+      - "127.0.0.1:${GROK2API_HOST_PORT:-8000}:8000"
     volumes:
       - ./runtime/grok2api/data:/app/data
       - ./runtime/grok2api/logs:/app/logs
@@ -55,14 +58,22 @@ services:
       GROK_REGISTER_DEFAULT_RUN_COUNT: ${GROK_REGISTER_DEFAULT_RUN_COUNT:-50}
       GROK_REGISTER_DEFAULT_PROXY: ${GROK_REGISTER_DEFAULT_PROXY:-socks5://warp:1080}
       GROK_REGISTER_DEFAULT_BROWSER_PROXY: ${GROK_REGISTER_DEFAULT_BROWSER_PROXY:-socks5://warp:1080}
-      GROK_REGISTER_DEFAULT_API_ENDPOINT: ${GROK_REGISTER_DEFAULT_API_ENDPOINT:-http://grok2api:8000/v1/admin/tokens}
+      GROK_REGISTER_DEFAULT_API_ENDPOINT: ${GROK_REGISTER_DEFAULT_API_ENDPOINT:-http://172.18.0.1:8000/api/admin/v1/auth/login}
+      GROK_REGISTER_DEFAULT_API_IMPORT_ENDPOINT: ${GROK_REGISTER_DEFAULT_API_IMPORT_ENDPOINT:-http://172.18.0.1:8000/api/admin/v1/accounts/web/import}
+      GROK_REGISTER_DEFAULT_API_ADMIN_USERNAME: ${GROK_REGISTER_DEFAULT_API_ADMIN_USERNAME:-admin}
+      GROK_REGISTER_DEFAULT_API_ADMIN_PASSWORD: ${GROK_REGISTER_DEFAULT_API_ADMIN_PASSWORD:-admin123}
       GROK_REGISTER_DEFAULT_API_TOKEN: ${GROK_REGISTER_DEFAULT_API_TOKEN:-change-this-admin-password}
       GROK_REGISTER_DEFAULT_API_APPEND: ${GROK_REGISTER_DEFAULT_API_APPEND:-true}
+      # Build OAuth 直接写入宿主机 CLIProxyAPI auths（见下方挂载）
+      GROK_REGISTER_DEFAULT_CLIPROXY_AUTH_DIR: ${GROK_REGISTER_DEFAULT_CLIPROXY_AUTH_DIR:-/cliproxy-auths}
+      CLIPROXYAPI_AUTH_DIR: ${CLIPROXYAPI_AUTH_DIR:-/cliproxy-auths}
+      # password CreateSession 兜底（协议 OAuth 需要时）
+      YESCAPTCHA_API_KEY: ${YESCAPTCHA_API_KEY:-}
     ports:
-      - "${GROK_STACK_CONSOLE_PORT:-18600}:18600"
+      - "127.0.0.1:${GROK_STACK_CONSOLE_PORT:-18600}:18600"
     volumes:
       - .:/workspace
+      - ${CLIPROXY_HOST_AUTH_DIR:-/root/docker/CLIProxyAPI/auths}:/cliproxy-auths
     restart: unless-stopped
     depends_on:
-      - grok2api
       - warp

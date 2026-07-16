@@ -34,12 +34,22 @@ def _extract_user_agent(solution: dict) -> str:
 
 
 def _extract_browser_profile(user_agent: str) -> str:
-    """从 User-Agent 提取 chromeXXX 格式的指纹识别号"""
+    """Return a curl_cffi-supported Chromium fingerprint for FlareSolverr's UA.
+
+    FlareSolverr may use a Chrome version newer than curl_cffi supports.  Passing
+    that raw version (for example ``chrome148``) causes every reverse request to
+    fail before it is sent.  Use the closest supported Chromium profile instead.
+    """
     import re
+
+    supported = (99, 100, 101, 104, 107, 110, 116, 119, 120, 123, 124, 131, 136, 142)
     match = re.search(r"Chrome/(\d+)", user_agent)
-    if match:
-        return f"chrome{match.group(1)}"
-    return "chrome120"
+    if not match:
+        return "chrome120"
+
+    detected = int(match.group(1))
+    compatible = max((version for version in supported if version <= detected), default=120)
+    return f"chrome{compatible}"
 
 
 async def solve_cf_challenge() -> Optional[Dict[str, str]]:

@@ -39,7 +39,7 @@ SOURCE_VENV_PYTHON = Path(
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("GROK_REGISTER_CONSOLE_MAX_CONCURRENT_TASKS", "1")))
 SUPERVISOR_INTERVAL = max(1.0, float(os.getenv("GROK_REGISTER_CONSOLE_POLL_INTERVAL", "2")))
 
-PROJECT_FILES = ("DrissionPage_example.py", "email_register.py")
+PROJECT_FILES = ("DrissionPage_example.py", "email_register.py", "mint_and_push.py")
 PROJECT_DIRS = ("turnstilePatch",)
 
 STATUS_QUEUED = "queued"
@@ -179,6 +179,9 @@ def load_source_defaults() -> dict[str, Any]:
     api_env_map = {
         "endpoint": "GROK_REGISTER_DEFAULT_API_ENDPOINT",
         "token": "GROK_REGISTER_DEFAULT_API_TOKEN",
+        "import_endpoint": "GROK_REGISTER_DEFAULT_API_IMPORT_ENDPOINT",
+        "admin_username": "GROK_REGISTER_DEFAULT_API_ADMIN_USERNAME",
+        "admin_password": "GROK_REGISTER_DEFAULT_API_ADMIN_PASSWORD",
     }
     for key, env_name in api_env_map.items():
         value = os.getenv(env_name)
@@ -187,7 +190,44 @@ def load_source_defaults() -> dict[str, Any]:
     append_env = os.getenv("GROK_REGISTER_DEFAULT_API_APPEND")
     if append_env is not None:
         api_base["append"] = append_env.strip().lower() in {"1", "true", "yes", "on"}
+    # 兼容旧 token-sink 配置：若仍是 /v1/admin/tokens，改用 Go 版 admin login。
+    endpoint = str(api_base.get("endpoint", "") or "").strip()
+    if endpoint.endswith("/v1/admin/tokens") or "/v1/admin/tokens" in endpoint:
+        # console 容器常无法解析 grok2api 主机名；优先用 docker bridge 网关。
+        api_base["endpoint"] = "http://172.18.0.1:8000/api/admin/v1/auth/login"
+        api_base.setdefault(
+            "import_endpoint",
+            "http://172.18.0.1:8000/api/admin/v1/accounts/web/import",
+        )
+        api_base.setdefault("admin_username", "admin")
+        if not str(api_base.get("admin_password", "") or "").strip() and api_base.get("token"):
+            # 旧 token 字段不再作为 Bearer；若显式配置了 admin_password 则用它。
+            pass
+    if not str(api_base.get("import_endpoint", "") or "").strip():
+        login_ep = str(api_base.get("endpoint", "") or "").strip()
+        if login_ep.endswith("/auth/login"):
+            api_base["import_endpoint"] = login_ep.replace("/auth/login", "/accounts/web/import")
     base["api"] = api_base
+
+    # CLIProxyAPI auth 目录：优先容器挂载点 /cliproxy-auths（对应宿主机 CLIProxyAPI/auths）
+    cliproxy_env = (
+        os.getenv("GROK_REGISTER_DEFAULT_CLIPROXY_AUTH_DIR")
+        or os.getenv("CLIPROXYAPI_AUTH_DIR")
+        or ""
+    ).strip()
+    if cliproxy_env:
+        base["cliproxy_auth_dir"] = cliproxy_env
+    else:
+        base.setdefault("cliproxy_auth_dir", "/cliproxy-auths")
+    base.setdefault("cliproxy_push_enabled", True)
+    base.setdefault("cpa_enabled", False)
+
+    # YesCaptcha：仅透传环境变量，不写进配置文件明文
+    yk = (os.getenv("YESCAPTCHA_API_KEY") or "").strip()
+    if yk:
+        base["yescaptcha_api_key_configured"] = True
+    else:
+        base["yescaptcha_api_key_configured"] = False
     return base
 
 
@@ -311,7 +351,24 @@ def run_health_checks() -> dict[str, Any]:
         )
     else:
         try:
-            response = _request_with_optional_proxy(api_endpoint, timeout=15)
+            # Go 版 admin login 需要 POST；旧 token-sink 可能接受 GET。
+            method = "POST" if api_endpoint.rstrip("/").endswith("/auth/login") else "GET"
+            headers = {"Content-Type": "application/json"} if method == "POST" else None
+            body = None
+            if method == "POST":
+                api_conf = dict(defaults.get("api") or {})
+                body = {
+                    "username": str(api_conf.get("admin_username") or "admin"),
+                    "password": str(api_conf.get("admin_password") or ""),
+                }
+            response = requests.request(
+                method,
+                api_endpoint,
+                timeout=15,
+                headers=headers,
+                json=body,
+                allow_redirects=True,
+            )
             ok = response.status_code in {200, 401, 403, 405}
             items.append(
                 _build_health_item(
@@ -428,6 +485,9 @@ class TaskCreate(BaseModel):
     api_endpoint: str | None = None
     api_token: str | None = None
     api_append: bool | None = None
+    api_import_endpoint: str | None = None
+    api_admin_username: str | None = None
+    api_admin_password: str | None = None
     notes: str = ""
 
 
@@ -441,6 +501,9 @@ class SystemSettings(BaseModel):
     api_endpoint: str = ""
     api_token: str = ""
     api_append: bool = True
+    api_import_endpoint: str = ""
+    api_admin_username: str = "admin"
+    api_admin_password: str = ""
 
 
 @dataclass
@@ -491,13 +554,75 @@ def merged_defaults() -> dict[str, Any]:
         api_base["token"] = str(saved.get("api_token", ""))
     if "api_append" in saved:
         api_base["append"] = bool(saved.get("api_append", True))
+    if "api_import_endpoint" in saved:
+        api_base["import_endpoint"] = str(saved.get("api_import_endpoint", ""))
+    if "api_admin_username" in saved:
+        api_base["admin_username"] = str(saved.get("api_admin_username", "admin"))
+    if "api_admin_password" in saved:
+        api_base["admin_password"] = str(saved.get("api_admin_password", ""))
+    # 再次兜底旧 token-sink endpoint。
+    endpoint = str(api_base.get("endpoint", "") or "").strip()
+    if endpoint.endswith("/v1/admin/tokens") or "/v1/admin/tokens" in endpoint:
+        api_base["endpoint"] = "http://172.18.0.1:8000/api/admin/v1/auth/login"
+        api_base.setdefault(
+            "import_endpoint",
+            "http://172.18.0.1:8000/api/admin/v1/accounts/web/import",
+        )
+    if not str(api_base.get("import_endpoint", "") or "").strip():
+        login_ep = str(api_base.get("endpoint", "") or "").strip()
+        if login_ep.endswith("/auth/login"):
+            api_base["import_endpoint"] = login_ep.replace("/auth/login", "/accounts/web/import")
     base["api"] = api_base
+
+    # CLIProxyAPI auth 目录：优先容器挂载点 /cliproxy-auths（对应宿主机 CLIProxyAPI/auths）
+    cliproxy_env = (
+        os.getenv("GROK_REGISTER_DEFAULT_CLIPROXY_AUTH_DIR")
+        or os.getenv("CLIPROXYAPI_AUTH_DIR")
+        or ""
+    ).strip()
+    if cliproxy_env:
+        base["cliproxy_auth_dir"] = cliproxy_env
+    else:
+        base.setdefault("cliproxy_auth_dir", "/cliproxy-auths")
+    base.setdefault("cliproxy_push_enabled", True)
+    base.setdefault("cpa_enabled", False)
+
+    # YesCaptcha：仅透传环境变量，不写进配置文件明文
+    yk = (os.getenv("YESCAPTCHA_API_KEY") or "").strip()
+    if yk:
+        base["yescaptcha_api_key_configured"] = True
+    else:
+        base["yescaptcha_api_key_configured"] = False
     return base
 
 
 def build_task_config(payload: TaskCreate) -> dict[str, Any]:
     defaults = merged_defaults()
     api_defaults = dict(defaults.get("api") or {})
+    api_conf = {
+        "endpoint": api_defaults.get("endpoint", "") if payload.api_endpoint is None else payload.api_endpoint.strip(),
+        "token": api_defaults.get("token", "") if payload.api_token is None else payload.api_token.strip(),
+        "append": api_defaults.get("append", True) if payload.api_append is None else bool(payload.api_append),
+        "import_endpoint": (
+            api_defaults.get("import_endpoint", "")
+            if payload.api_import_endpoint is None
+            else payload.api_import_endpoint.strip()
+        ),
+        "admin_username": (
+            api_defaults.get("admin_username", "admin")
+            if payload.api_admin_username is None
+            else payload.api_admin_username.strip()
+        ),
+        "admin_password": (
+            api_defaults.get("admin_password", "")
+            if payload.api_admin_password is None
+            else payload.api_admin_password.strip()
+        ),
+    }
+    if not str(api_conf.get("import_endpoint", "") or "").strip():
+        login_ep = str(api_conf.get("endpoint", "") or "").strip()
+        if login_ep.endswith("/auth/login"):
+            api_conf["import_endpoint"] = login_ep.replace("/auth/login", "/accounts/web/import")
     return {
         "run": {"count": int(payload.count)},
         "proxy": defaults.get("proxy", "") if payload.proxy is None else payload.proxy.strip(),
@@ -506,11 +631,14 @@ def build_task_config(payload: TaskCreate) -> dict[str, Any]:
         "temp_mail_admin_password": defaults.get("temp_mail_admin_password", "") if payload.temp_mail_admin_password is None else payload.temp_mail_admin_password.strip(),
         "temp_mail_domain": defaults.get("temp_mail_domain", "") if payload.temp_mail_domain is None else payload.temp_mail_domain.strip(),
         "temp_mail_site_password": defaults.get("temp_mail_site_password", "") if payload.temp_mail_site_password is None else payload.temp_mail_site_password.strip(),
-        "api": {
-            "endpoint": api_defaults.get("endpoint", "") if payload.api_endpoint is None else payload.api_endpoint.strip(),
-            "token": api_defaults.get("token", "") if payload.api_token is None else payload.api_token.strip(),
-            "append": api_defaults.get("append", True) if payload.api_append is None else bool(payload.api_append),
-        },
+        "api": api_conf,
+        # Build OAuth / CLIProxy 输出目录（容器内路径）
+        "cliproxy_auth_dir": defaults.get("cliproxy_auth_dir", "/cliproxy-auths"),
+        "cliproxy_push_enabled": bool(defaults.get("cliproxy_push_enabled", True)),
+        # grok.com /rest/app/mint 已 404；默认关闭旧 CPA mint，改由 Build OAuth 产出 auth。
+        "cpa_enabled": bool(defaults.get("cpa_enabled", False)),
+        "cpa_local_dir": defaults.get("cpa_local_dir", "./output/cpa_auths"),
+        "cpa_proxy": defaults.get("cpa_proxy", ""),
     }
 
 
@@ -718,9 +846,29 @@ class TaskSupervisor:
             str(output_path),
         ]
         log_handle = console_path.open("a", encoding="utf-8")
+        # 任务 cwd 是 task_dir，需把仓库根目录加入 PYTHONPATH，
+        # 否则无法 import 根目录下的 xconsole_client。
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH", "").strip()
+        env["PYTHONPATH"] = (
+            f"{SOURCE_PROJECT}{os.pathsep}{existing_pythonpath}"
+            if existing_pythonpath
+            else str(SOURCE_PROJECT)
+        )
+        # Build OAuth / password CreateSession 兜底依赖
+        cliproxy_dir = str((task_config or {}).get("cliproxy_auth_dir") or "").strip()
+        if cliproxy_dir:
+            env["CLIPROXYAPI_AUTH_DIR"] = cliproxy_dir
+        # 保留宿主机/容器注入的 YESCAPTCHA_API_KEY（若有）
+        if not (env.get("YESCAPTCHA_API_KEY") or "").strip():
+            # 也允许从 config 透传（不推荐，但兼容）
+            yk = str((task_config or {}).get("yescaptcha_api_key") or "").strip()
+            if yk:
+                env["YESCAPTCHA_API_KEY"] = yk
         process = subprocess.Popen(
             command,
             cwd=task_dir,
+            env=env,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
