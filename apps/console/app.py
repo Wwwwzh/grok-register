@@ -18,8 +18,7 @@ from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -38,6 +37,18 @@ SOURCE_VENV_PYTHON = Path(
 ).expanduser()
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("GROK_REGISTER_CONSOLE_MAX_CONCURRENT_TASKS", "1")))
 SUPERVISOR_INTERVAL = max(1.0, float(os.getenv("GROK_REGISTER_CONSOLE_POLL_INTERVAL", "2")))
+
+
+def _normalize_root_path(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw or raw == "/":
+        return ""
+    if not raw.startswith("/"):
+        raw = f"/{raw}"
+    return raw.rstrip("/")
+
+
+ROOT_PATH = _normalize_root_path(os.getenv("GROK_REGISTER_CONSOLE_ROOT_PATH", ""))
 
 PROJECT_FILES = ("DrissionPage_example.py", "email_register.py", "mint_and_push.py")
 PROJECT_DIRS = ("turnstilePatch",)
@@ -960,8 +971,17 @@ async def lifespan(_: FastAPI):
         supervisor.stop()
 
 
-app = FastAPI(title="Grok Register Console", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
+app = FastAPI(title="Grok Register Console", lifespan=lifespan, root_path=ROOT_PATH)
+STATIC_DIR = APP_DIR / "static"
+
+
+@app.get("/static/{asset_path:path}")
+def static_asset(asset_path: str) -> FileResponse:
+    # Explicit static route: more reliable than StaticFiles mount under reverse-proxy root_path.
+    target = (STATIC_DIR / asset_path).resolve()
+    if not str(target).startswith(str(STATIC_DIR.resolve())) or not target.is_file():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return FileResponse(target)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -974,6 +994,7 @@ def index(request: Request) -> HTMLResponse:
             "defaults": json.dumps(merged_defaults(), ensure_ascii=False),
             "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
             "source_project": str(SOURCE_PROJECT),
+            "base_path": ROOT_PATH,
         },
     )
 

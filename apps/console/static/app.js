@@ -1,4 +1,7 @@
 (function () {
+  const BASE_PATH = String(window.__BASE_PATH__ || "").replace(/\/$/, "");
+  const apiUrl = (path) => `${BASE_PATH}${path.startsWith("/") ? path : `/${path}`}`;
+
   const state = {
     tasks: [],
     selectedTaskId: null,
@@ -167,7 +170,7 @@
   }
 
   async function fetchJson(url, options) {
-    const response = await fetch(url, options);
+    const response = await fetch(apiUrl(url), options);
     const data = await response.json();
     if (!response.ok) {
       throw new Error(data.detail || "Request failed");
