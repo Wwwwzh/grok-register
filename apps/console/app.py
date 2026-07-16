@@ -35,8 +35,17 @@ SOURCE_PROJECT = Path(os.getenv("GROK_REGISTER_SOURCE_DIR", str(REPO_ROOT))).res
 SOURCE_VENV_PYTHON = Path(
     os.getenv("GROK_REGISTER_PYTHON", str(SOURCE_PROJECT / ".venv" / "bin" / "python"))
 ).expanduser()
-MAX_CONCURRENT_TASKS = max(1, int(os.getenv("GROK_REGISTER_CONSOLE_MAX_CONCURRENT_TASKS", "1")))
+DEFAULT_MAX_CONCURRENT_TASKS = max(
+    1, int(os.getenv("GROK_REGISTER_CONSOLE_MAX_CONCURRENT_TASKS", "1"))
+)
+# Hard ceiling so a bad UI value cannot fork-bomb the host.
+MAX_CONCURRENT_TASKS_CAP = max(
+    DEFAULT_MAX_CONCURRENT_TASKS,
+    int(os.getenv("GROK_REGISTER_CONSOLE_MAX_CONCURRENT_CAP", "8")),
+)
 SUPERVISOR_INTERVAL = max(1.0, float(os.getenv("GROK_REGISTER_CONSOLE_POLL_INTERVAL", "2")))
+# Backward-compatible alias used by templates/meta until settings override is applied.
+MAX_CONCURRENT_TASKS = DEFAULT_MAX_CONCURRENT_TASKS
 
 
 def _normalize_root_path(value: str | None) -> str:
@@ -515,6 +524,11 @@ class SystemSettings(BaseModel):
     api_import_endpoint: str = ""
     api_admin_username: str = "admin"
     api_admin_password: str = ""
+    max_concurrent_tasks: int = Field(
+        default=DEFAULT_MAX_CONCURRENT_TASKS,
+        ge=1,
+        le=MAX_CONCURRENT_TASKS_CAP,
+    )
 
 
 @dataclass
@@ -537,6 +551,7 @@ def read_settings() -> dict[str, Any]:
 
 def write_settings(settings: SystemSettings) -> dict[str, Any]:
     data = settings.model_dump()
+    data["max_concurrent_tasks"] = get_max_concurrent_tasks(data)
     execute(
         """
         INSERT INTO settings (key, value, updated_at)
@@ -546,6 +561,17 @@ def write_settings(settings: SystemSettings) -> dict[str, Any]:
         ("system", json.dumps(data, ensure_ascii=False), now_iso()),
     )
     return data
+
+
+def get_max_concurrent_tasks(saved: dict[str, Any] | None = None) -> int:
+    """Runtime concurrency limit: settings override env default, hard-capped."""
+    data = saved if isinstance(saved, dict) else read_settings()
+    raw = data.get("max_concurrent_tasks", DEFAULT_MAX_CONCURRENT_TASKS)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = DEFAULT_MAX_CONCURRENT_TASKS
+    return max(1, min(value, MAX_CONCURRENT_TASKS_CAP))
 
 
 def merged_defaults() -> dict[str, Any]:
@@ -597,6 +623,8 @@ def merged_defaults() -> dict[str, Any]:
         base.setdefault("cliproxy_auth_dir", "/cliproxy-auths")
     base.setdefault("cliproxy_push_enabled", True)
     base.setdefault("cpa_enabled", False)
+    base["max_concurrent_tasks"] = get_max_concurrent_tasks(saved)
+    base["max_concurrent_tasks_cap"] = MAX_CONCURRENT_TASKS_CAP
 
     # YesCaptcha：仅透传环境变量，不写进配置文件明文
     yk = (os.getenv("YESCAPTCHA_API_KEY") or "").strip()
@@ -830,7 +858,7 @@ class TaskSupervisor:
             time.sleep(SUPERVISOR_INTERVAL)
 
     def _launch_queued(self) -> None:
-        slots = MAX_CONCURRENT_TASKS - self._running_count()
+        slots = get_max_concurrent_tasks() - self._running_count()
         if slots <= 0:
             return
         queued = fetch_all(
@@ -992,7 +1020,8 @@ def index(request: Request) -> HTMLResponse:
         {
             "request": request,
             "defaults": json.dumps(merged_defaults(), ensure_ascii=False),
-            "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
+            "max_concurrent_tasks": get_max_concurrent_tasks(),
+            "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,
             "source_project": str(SOURCE_PROJECT),
             "base_path": ROOT_PATH,
         },
@@ -1006,7 +1035,8 @@ def api_meta() -> dict[str, Any]:
         "settings": read_settings(),
         "source_project": str(SOURCE_PROJECT),
         "python_path": str(SOURCE_VENV_PYTHON),
-        "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
+        "max_concurrent_tasks": get_max_concurrent_tasks(),
+        "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,
     }
 
 
@@ -1023,7 +1053,13 @@ def get_settings() -> dict[str, Any]:
 @app.post("/api/settings")
 def save_settings(payload: SystemSettings) -> dict[str, Any]:
     saved = write_settings(payload)
-    return {"settings": saved, "defaults": merged_defaults()}
+    defaults = merged_defaults()
+    return {
+        "settings": saved,
+        "defaults": defaults,
+        "max_concurrent_tasks": defaults.get("max_concurrent_tasks", get_max_concurrent_tasks()),
+        "max_concurrent_tasks_cap": MAX_CONCURRENT_TASKS_CAP,
+    }
 
 
 @app.get("/api/tasks")

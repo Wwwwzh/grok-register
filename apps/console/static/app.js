@@ -37,6 +37,17 @@
     const defaults = window.__DEFAULTS__ || {};
     formEl.elements.name.value = `grok-task-${Date.now()}`;
     formEl.elements.count.value = defaults.run?.count || 50;
+    const concurrent = Number(defaults.max_concurrent_tasks || 1);
+    const concurrentCap = Number(defaults.max_concurrent_tasks_cap || 8);
+    if (settingsFormEl.elements.max_concurrent_tasks) {
+      settingsFormEl.elements.max_concurrent_tasks.min = 1;
+      settingsFormEl.elements.max_concurrent_tasks.max = concurrentCap;
+      settingsFormEl.elements.max_concurrent_tasks.value = concurrent;
+    }
+    const concurrentValueEl = document.getElementById("maxConcurrentValue");
+    if (concurrentValueEl) {
+      concurrentValueEl.textContent = String(concurrent);
+    }
     settingsFormEl.elements.proxy.value = defaults.proxy || "";
     settingsFormEl.elements.browser_proxy.value = defaults.browser_proxy || "";
     settingsFormEl.elements.temp_mail_api_base.value = defaults.temp_mail_api_base || "";
@@ -268,6 +279,7 @@
 
   settingsFormEl.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const concurrentRaw = Number(settingsFormEl.elements.max_concurrent_tasks?.value || 1);
     const payload = {
       proxy: settingsFormEl.elements.proxy.value.trim(),
       browser_proxy: settingsFormEl.elements.browser_proxy.value.trim(),
@@ -278,6 +290,7 @@
       api_endpoint: settingsFormEl.elements.api_endpoint.value.trim(),
       api_token: settingsFormEl.elements.api_token.value.trim(),
       api_append: settingsFormEl.elements.api_append.checked,
+      max_concurrent_tasks: Number.isFinite(concurrentRaw) ? concurrentRaw : 1,
     };
     try {
       const data = await fetchJson("/api/settings", {
@@ -286,7 +299,13 @@
         body: JSON.stringify(payload),
       });
       window.__DEFAULTS__ = data.defaults || window.__DEFAULTS__;
-      settingsMessageEl.textContent = "默认配置已保存";
+      if (data.max_concurrent_tasks != null) {
+        window.__DEFAULTS__.max_concurrent_tasks = data.max_concurrent_tasks;
+      }
+      if (data.max_concurrent_tasks_cap != null) {
+        window.__DEFAULTS__.max_concurrent_tasks_cap = data.max_concurrent_tasks_cap;
+      }
+      settingsMessageEl.textContent = `默认配置已保存（并发上限 ${window.__DEFAULTS__.max_concurrent_tasks || payload.max_concurrent_tasks}）`;
       settingsMessageEl.className = "form-message success";
       setDefaults();
       await refreshHealth();

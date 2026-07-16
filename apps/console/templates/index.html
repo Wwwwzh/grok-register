@@ -21,7 +21,7 @@
         </div>
         <div class="meta-card">
           <div class="meta-label">并发上限</div>
-          <div class="meta-value">{{ max_concurrent_tasks }}</div>
+          <div class="meta-value" id="maxConcurrentValue">{{ max_concurrent_tasks }}</div>
         </div>
       </div>
     </header>
@@ -38,6 +38,11 @@
         </div>
 
         <form id="settingsForm" class="task-form hidden">
+          <label>
+            <span>任务并发上限</span>
+            <small>同时运行的注册任务数。默认 1；可在控制台改，最高 {{ max_concurrent_tasks_cap }}。</small>
+            <input name="max_concurrent_tasks" type="number" min="1" max="{{ max_concurrent_tasks_cap }}" step="1" value="{{ max_concurrent_tasks }}">
+          </label>
           <label>
             <span>浏览器代理</span>
             <small>浏览器访问 x.ai 时走的代理，通常填本机 WARP 桥接地址。</small>
