@@ -13,6 +13,7 @@
     taskSearch: "",
     templates: [],
     lastHealth: null,
+    lastPoolTrend: null,
     lastLogLines: [],
     autoScroll: true,
     refreshingTasks: false,
@@ -42,6 +43,10 @@
   const advancedFieldsEl = document.getElementById("advancedFields");
   const healthGridEl = document.getElementById("healthGrid");
   const healthMetaEl = document.getElementById("healthMeta");
+  const poolTrendBoxEl = document.getElementById("poolTrendBox");
+  const poolTrendTitleEl = document.getElementById("poolTrendTitle");
+  const poolTrendDeltaEl = document.getElementById("poolTrendDelta");
+  const poolTrendChartEl = document.getElementById("poolTrendChart");
   const overviewRunningEl = document.getElementById("overviewRunning");
   const overviewRunningHintEl = document.getElementById("overviewRunningHint");
   const overviewPoolTotalEl = document.getElementById("overviewPoolTotal");
@@ -297,6 +302,90 @@
     };
   }
 
+  function formatSigned(n) {
+    const v = Number(n || 0);
+    if (v > 0) return `+${v}`;
+    return String(v);
+  }
+
+  function deltaClass(n) {
+    const v = Number(n || 0);
+    if (v > 0) return "up";
+    if (v < 0) return "down";
+    return "flat";
+  }
+
+  function sparklinePath(values, width, height, pad = 6) {
+    const nums = values.map((v) => Number(v) || 0);
+    if (!nums.length) return "";
+    const min = Math.min(...nums);
+    const max = Math.max(...nums);
+    const span = Math.max(1, max - min);
+    const n = nums.length;
+    return nums.map((v, i) => {
+      const x = n === 1 ? width / 2 : pad + (i * (width - pad * 2)) / (n - 1);
+      const y = height - pad - ((v - min) / span) * (height - pad * 2);
+      return `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(" ");
+  }
+
+  function renderPoolTrend(trend) {
+    if (!poolTrendChartEl) return;
+    state.lastPoolTrend = trend || null;
+    const points = (trend && trend.points) || [];
+    const latest = (trend && trend.latest) || null;
+    const delta = (trend && trend.delta) || {};
+    if (poolTrendTitleEl) {
+      if (latest) {
+        poolTrendTitleEl.textContent = `总量 ${latest.total || 0} · web ${latest.grok_web || 0} / build ${latest.grok_build || 0} / console ${latest.grok_console || 0}`;
+      } else {
+        poolTrendTitleEl.textContent = "等待采样";
+      }
+    }
+    if (poolTrendDeltaEl) {
+      if (points.length >= 2) {
+        poolTrendDeltaEl.innerHTML = [
+          `<span class="${deltaClass(delta.total)}">总量 ${formatSigned(delta.total)}</span>`,
+          `<span class="${deltaClass(delta.grok_web)}">web ${formatSigned(delta.grok_web)}</span>`,
+          `<span class="${deltaClass(delta.grok_build)}">build ${formatSigned(delta.grok_build)}</span>`,
+          `<span class="${deltaClass(delta.grok_console)}">console ${formatSigned(delta.grok_console)}</span>`,
+        ].join("<br>");
+      } else {
+        poolTrendDeltaEl.textContent = points.length ? "样本不足，继续采样中" : "尚无历史样本";
+      }
+    }
+    if (!points.length) {
+      poolTrendChartEl.innerHTML = `<div class="pool-trend-empty">健康检测后开始记录号池趋势</div>`;
+      return;
+    }
+    const width = 320;
+    const height = 120;
+    const series = [
+      { key: "total", color: "#b4472b", width: 2.4 },
+      { key: "grok_web", color: "#2857b5", width: 1.8 },
+      { key: "grok_build", color: "#2f7d48", width: 1.8 },
+      { key: "grok_console", color: "#8f5b00", width: 1.8 },
+    ];
+    const paths = series.map((s) => {
+      const d = sparklinePath(points.map((p) => p[s.key] || 0), width, height);
+      return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.width}" stroke-linecap="round" stroke-linejoin="round"></path>`;
+    }).join("");
+    const last = points[points.length - 1] || {};
+    poolTrendChartEl.innerHTML = `
+      <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="号池趋势图">
+        ${paths}
+        <circle cx="${width - 6}" cy="${(() => {
+          const vals = points.map((p) => Number(p.total || 0));
+          const min = Math.min(...vals);
+          const max = Math.max(...vals);
+          const span = Math.max(1, max - min);
+          const v = Number(last.total || 0);
+          return (height - 6 - ((v - min) / span) * (height - 12)).toFixed(1);
+        })()}" r="3.2" fill="#b4472b"></circle>
+      </svg>
+    `;
+  }
+
   function renderOverview() {
     const tasks = state.tasks || [];
     const running = tasks.filter((t) => t.status === "running").length;
@@ -350,6 +439,11 @@
       `最近检测时间 ${data.checked_at || "-"}`,
       poolBits.length ? poolBits.join(" · ") : "",
     ].filter(Boolean).join(" | ");
+    if (data.pool_trend) {
+      renderPoolTrend(data.pool_trend);
+    } else if (state.lastPoolTrend) {
+      renderPoolTrend(state.lastPoolTrend);
+    }
 
     if (!items.length) {
       healthGridEl.innerHTML = '<div class="empty">暂无健康检查结果</div>';
@@ -658,6 +752,15 @@
     try {
       healthMetaEl.textContent = "检测中...";
       const data = await fetchJson("/api/health");
+      // Prefer longer dedicated trend history when available.
+      try {
+        const trend = await fetchJson("/api/pool/trend?limit=72");
+        if (trend && (trend.points || trend.latest)) {
+          data.pool_trend = trend;
+        }
+      } catch (error) {
+        // Keep embedded health trend if dedicated endpoint fails.
+      }
       renderHealth(data);
     } catch (error) {
       healthMetaEl.textContent = `检测失败: ${error.message}`;

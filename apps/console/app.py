@@ -668,15 +668,30 @@ def run_health_checks() -> dict[str, Any]:
         )
     )
 
+    checked_at = now_iso()
+    # Keep a lightweight local history for pool trend charts.
+    try:
+        record_pool_snapshot(
+            {
+                "ok": bool(pool.get("ok")),
+                "total": pool.get("total", 0),
+                "providers": pool.get("providers") or {},
+            },
+            checked_at=checked_at,
+        )
+    except Exception:
+        # History must never break health checks.
+        pass
     return {
         "items": items,
-        "checked_at": now_iso(),
+        "checked_at": checked_at,
         "pool": {
             "total": pool.get("total", 0),
             "providers": pool.get("providers") or {},
             "import_ok": pool.get("import_ok"),
             "import_summary": pool.get("import_summary"),
         },
+        "pool_trend": build_pool_trend(limit=24),
     }
 
 
@@ -834,6 +849,105 @@ def write_templates(templates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ("templates", payload, now_iso()),
     )
     return templates
+
+
+POOL_HISTORY_KEY = "pool_history"
+POOL_HISTORY_MAX_POINTS = 288  # ~24h if sampled every 5 min; also used with health refresh cadence
+POOL_HISTORY_MIN_INTERVAL_SEC = 60
+
+
+def read_pool_history() -> list[dict[str, Any]]:
+    row = fetch_one("SELECT value FROM settings WHERE key = ?", (POOL_HISTORY_KEY,))
+    if not row:
+        return []
+    try:
+        data = json.loads(row["value"])
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in data:
+        if isinstance(item, dict) and item.get("ts"):
+            out.append(item)
+    return out
+
+
+def write_pool_history(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload = json.dumps(points[-POOL_HISTORY_MAX_POINTS:], ensure_ascii=False)
+    execute_no_return(
+        """
+        INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (POOL_HISTORY_KEY, payload, now_iso()),
+    )
+    return points[-POOL_HISTORY_MAX_POINTS:]
+
+
+def _parse_iso_ts(value: str) -> float | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        # Support "YYYY-MM-DD HH:MM:SS" and ISO with T/Z.
+        cleaned = raw.replace("Z", "+00:00").replace(" ", "T")
+        dt = datetime.fromisoformat(cleaned)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def record_pool_snapshot(pool: dict[str, Any], checked_at: str | None = None) -> dict[str, Any]:
+    """Append a pool snapshot if enough time has passed since the last sample."""
+    ts = checked_at or now_iso()
+    providers = dict(pool.get("providers") or {})
+    point = {
+        "ts": ts,
+        "ok": bool(pool.get("ok")),
+        "total": int(pool.get("total") or 0),
+        "grok_web": int(providers.get("grok_web") or 0),
+        "grok_build": int(providers.get("grok_build") or 0),
+        "grok_console": int(providers.get("grok_console") or 0),
+    }
+    history = read_pool_history()
+    if history:
+        last_ts = _parse_iso_ts(str(history[-1].get("ts") or ""))
+        cur_ts = _parse_iso_ts(ts)
+        if last_ts is not None and cur_ts is not None and (cur_ts - last_ts) < POOL_HISTORY_MIN_INTERVAL_SEC:
+            # Update the last point in-place so UI still sees freshest totals without exploding history.
+            history[-1] = point
+            write_pool_history(history)
+            return point
+    history.append(point)
+    write_pool_history(history)
+    return point
+
+
+def build_pool_trend(limit: int = 72) -> dict[str, Any]:
+    history = read_pool_history()
+    points = history[-max(1, min(int(limit or 72), POOL_HISTORY_MAX_POINTS)):]
+    if not points:
+        return {
+            "points": [],
+            "latest": None,
+            "delta": {"total": 0, "grok_web": 0, "grok_build": 0, "grok_console": 0},
+            "window": {"count": 0, "from": None, "to": None},
+        }
+    first = points[0]
+    last = points[-1]
+    keys = ("total", "grok_web", "grok_build", "grok_console")
+    delta = {k: int(last.get(k) or 0) - int(first.get(k) or 0) for k in keys}
+    return {
+        "points": points,
+        "latest": last,
+        "delta": delta,
+        "window": {
+            "count": len(points),
+            "from": first.get("ts"),
+            "to": last.get("ts"),
+        },
+    }
 
 
 def classify_error_text(text: str) -> str:
@@ -1549,6 +1663,13 @@ def api_meta() -> dict[str, Any]:
 @app.get("/api/health")
 def api_health() -> dict[str, Any]:
     return run_health_checks()
+
+
+@app.get("/api/pool/trend")
+def api_pool_trend(limit: int = 72) -> dict[str, Any]:
+    limit = max(1, min(int(limit or 72), POOL_HISTORY_MAX_POINTS))
+    trend = build_pool_trend(limit=limit)
+    return {"ok": True, **trend}
 
 
 @app.get("/api/settings")
