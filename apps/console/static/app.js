@@ -14,6 +14,8 @@
     templates: [],
     lastHealth: null,
     lastPoolTrend: null,
+    auditItems: [],
+    seenAuditIds: {},
     sseConnected: false,
     sseSource: null,
     sseRetryMs: 2000,
@@ -54,6 +56,10 @@
   const poolTrendDeltaEl = document.getElementById("poolTrendDelta");
   const poolTrendChartEl = document.getElementById("poolTrendChart");
   const themeToggleBtnEl = document.getElementById("themeToggleBtn");
+  const toastHostEl = document.getElementById("toastHost");
+  const auditListEl = document.getElementById("auditList");
+  const auditMetaEl = document.getElementById("auditMeta");
+  const refreshAuditBtnEl = document.getElementById("refreshAuditBtn");
   const overviewRunningEl = document.getElementById("overviewRunning");
   const overviewRunningHintEl = document.getElementById("overviewRunningHint");
   const overviewPoolTotalEl = document.getElementById("overviewPoolTotal");
@@ -805,6 +811,30 @@
     if (!payload || typeof payload !== "object") return;
     const eventName = payload.event || "message";
     if (eventName === "ping" || eventName === "hello") return;
+    if (eventName === "audit") {
+      const item = payload.data || payload;
+      if (item && item.id != null) {
+        const id = String(item.id);
+        if (!state.seenAuditIds[id]) {
+          state.seenAuditIds[id] = true;
+          const title = item.event === "task_finished"
+            ? (item.level === "success" ? "任务完成" : item.level === "error" ? "任务失败" : "任务结束")
+            : item.event === "task_created"
+              ? "任务已创建"
+              : item.event === "tasks_cleanup"
+                ? "已清理任务"
+                : "任务通知";
+          if (["task_finished", "task_created", "task_deleted", "tasks_cleanup", "task_stopping", "task_stopped"].includes(item.event)) {
+            showToast(title, item.message || "", item.level || "info");
+          }
+          const next = [item, ...(state.auditItems || [])].slice(0, 40);
+          renderAuditList(next);
+        }
+      } else {
+        refreshAudit({ silent: true });
+      }
+      return;
+    }
     if (eventName === "tasks_changed" || eventName === "task_created" || eventName === "task_deleted" || eventName === "task_started" || eventName === "task_finished" || eventName === "task_stopping") {
       scheduleTaskRefresh(eventName);
       return;
@@ -827,6 +857,85 @@
       state.sseSource = null;
     }
     state.sseConnected = false;
+  }
+
+
+  function showToast(title, body, level = "info", ttlMs = 4500) {
+    if (!toastHostEl) return;
+    const el = document.createElement("div");
+    el.className = `toast ${level || "info"}`;
+    el.innerHTML = `
+      <div class="toast-title">${escapeHtml(title || "通知")}</div>
+      <div class="toast-body">${escapeHtml(body || "")}</div>
+    `;
+    toastHostEl.prepend(el);
+    window.setTimeout(() => {
+      el.style.opacity = "0";
+      el.style.transition = "opacity 200ms ease";
+      window.setTimeout(() => el.remove(), 220);
+    }, Math.max(2000, ttlMs));
+  }
+
+  function renderAuditList(items) {
+    if (!auditListEl) return;
+    const list = items || [];
+    state.auditItems = list;
+    if (auditMetaEl) {
+      auditMetaEl.textContent = list.length ? `最近 ${list.length} 条审计记录` : "暂无审计记录";
+    }
+    if (!list.length) {
+      auditListEl.innerHTML = '<div class="empty">创建/启停/结束/清理任务后会出现在这里</div>';
+      return;
+    }
+    auditListEl.innerHTML = list.map((item) => {
+      const level = item.level || "info";
+      const taskTag = item.task_id != null ? `<span class="audit-tag">#${escapeHtml(item.task_id)}</span>` : "";
+      const eventTag = `<span class="audit-tag">${escapeHtml(item.event || "-")}</span>`;
+      const levelTag = `<span class="audit-tag level-${escapeHtml(level)}">${escapeHtml(level)}</span>`;
+      return `
+        <div class="audit-item">
+          <div class="audit-time">${escapeHtml(item.created_at || "-")}</div>
+          <div class="audit-main">
+            <div class="audit-msg">${escapeHtml(item.message || "-")}</div>
+            <div class="audit-tags">${levelTag}${eventTag}${taskTag}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  async function refreshAudit({ silent = false } = {}) {
+    try {
+      const data = await fetchJson("/api/audit?limit=40");
+      const items = data.items || [];
+      // toast only for newly seen high-signal events
+      const important = new Set(["task_finished", "task_created", "task_deleted", "tasks_cleanup", "task_stopping", "task_stopped"]);
+      for (const item of items.slice().reverse()) {
+        const id = String(item.id || "");
+        if (!id || state.seenAuditIds[id]) continue;
+        state.seenAuditIds[id] = true;
+        if (!silent && important.has(item.event)) {
+          const title = item.event === "task_finished"
+            ? (item.level === "success" ? "任务完成" : item.level === "error" ? "任务失败" : "任务结束")
+            : item.event === "task_created"
+              ? "任务已创建"
+              : item.event === "tasks_cleanup"
+                ? "已清理任务"
+                : "任务通知";
+          showToast(title, item.message || "", item.level || "info");
+        }
+      }
+      // seed seen set fully
+      items.forEach((item) => {
+        if (item.id != null) state.seenAuditIds[String(item.id)] = true;
+      });
+      renderAuditList(items);
+    } catch (error) {
+      if (auditMetaEl) auditMetaEl.textContent = `审计加载失败: ${error.message}`;
+      if (!silent) {
+        // keep quiet on background failures
+      }
+    }
   }
 
   function connectSse() {
@@ -856,7 +965,7 @@
       } catch (error) {}
     };
 
-    ["hello", "ping", "tasks_changed", "task_created", "task_deleted", "task_started", "task_finished", "task_stopping", "task_progress", "message"].forEach((name) => {
+    ["hello", "ping", "audit", "tasks_changed", "task_created", "task_deleted", "task_started", "task_finished", "task_stopping", "task_progress", "message"].forEach((name) => {
       es.addEventListener(name, onAny);
     });
 
@@ -1297,6 +1406,9 @@
   if (themeToggleBtnEl) {
     themeToggleBtnEl.addEventListener("click", toggleTheme);
   }
+  if (refreshAuditBtnEl) {
+    refreshAuditBtnEl.addEventListener("click", () => refreshAudit({ silent: false }));
+  }
   applyTheme(getPreferredTheme(), { persist: false });
 
   setDefaults();
@@ -1307,6 +1419,7 @@
   });
   refreshHealth();
   refreshAll();
+  refreshAudit({ silent: true });
   connectSse();
   restartPolling();
 })();

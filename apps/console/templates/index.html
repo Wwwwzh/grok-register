@@ -20,6 +20,7 @@
     })();
   </script>
   <div id="app" class="shell">
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-relevant="additions"></div>
     <header class="topbar">
       <div class="brand">
         <div class="brand-kicker">Unified Console</div>
@@ -285,6 +286,19 @@
             </div>
           </div>
         </section>
+      </section>
+
+      <section class="panel panel-audit">
+        <div class="panel-head">
+          <div>
+            <div class="eyebrow">Audit</div>
+            <h2>通知与审计</h2>
+            <p class="panel-desc">记录任务创建、启动、结束、删除和清理操作。完成/失败会弹出通知。</p>
+          </div>
+          <button id="refreshAuditBtn" class="button button-secondary button-small" type="button">刷新</button>
+        </div>
+        <div id="auditMeta" class="health-meta">等待加载</div>
+        <div id="auditList" class="audit-list"></div>
       </section>
 
       <section class="workspace">

@@ -222,6 +222,19 @@ def init_db() -> None:
                 finished_at TEXT,
                 exit_code INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                level TEXT NOT NULL,
+                event TEXT NOT NULL,
+                task_id INTEGER,
+                message TEXT NOT NULL,
+                detail_json TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_task_id ON audit_logs(task_id);
             """
         )
 
@@ -793,6 +806,100 @@ class ManagedProcess:
     task_id: int
     process: subprocess.Popen[Any]
     log_handle: Any
+
+
+AUDIT_LOG_MAX = 500
+
+
+def write_audit_log(
+    event: str,
+    message: str,
+    *,
+    level: str = "info",
+    task_id: int | None = None,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    level = (level or "info").strip().lower() or "info"
+    if level not in {"info", "success", "warn", "error"}:
+        level = "info"
+    created_at = now_iso()
+    detail_json = json.dumps(detail or {}, ensure_ascii=False)
+    log_id = execute(
+        """
+        INSERT INTO audit_logs (created_at, level, event, task_id, message, detail_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (created_at, level, event, task_id, message, detail_json),
+    )
+    # Keep table bounded.
+    try:
+        execute_no_return(
+            """
+            DELETE FROM audit_logs
+            WHERE id NOT IN (
+                SELECT id FROM audit_logs ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (AUDIT_LOG_MAX,),
+        )
+    except Exception:
+        pass
+    item = {
+        "id": int(log_id),
+        "created_at": created_at,
+        "level": level,
+        "event": event,
+        "task_id": task_id,
+        "message": message,
+        "detail": detail or {},
+    }
+    try:
+        sse_hub.publish("audit", item)
+    except Exception:
+        pass
+    return item
+
+
+def list_audit_logs(limit: int = 50, task_id: int | None = None) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 50), 200))
+    if task_id is not None:
+        rows = fetch_all(
+            """
+            SELECT * FROM audit_logs
+            WHERE task_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(task_id), limit),
+        )
+    else:
+        rows = fetch_all(
+            """
+            SELECT * FROM audit_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        detail = {}
+        try:
+            detail = json.loads(row["detail_json"] or "{}")
+        except Exception:
+            detail = {}
+        out.append(
+            {
+                "id": int(row["id"]),
+                "created_at": row["created_at"],
+                "level": row["level"],
+                "event": row["event"],
+                "task_id": row["task_id"],
+                "message": row["message"] or "",
+                "detail": detail if isinstance(detail, dict) else {},
+            }
+        )
+    return out
 
 
 def read_settings() -> dict[str, Any]:
@@ -1387,6 +1494,17 @@ class TaskSupervisor:
                     """,
                     (STATUS_STOPPED, now_iso(), "Task stopped before launch.", task_id),
                 )
+                try:
+                    write_audit_log(
+                        "task_stopped",
+                        f"任务 #{task_id} 启动前已停止",
+                        level="warn",
+                        task_id=task_id,
+                        detail={"status": STATUS_STOPPED},
+                    )
+                    sse_hub.publish("tasks_changed", {"reason": "stopped", "task_id": task_id})
+                except Exception:
+                    pass
                 return
             raise HTTPException(status_code=409, detail="Task is not running")
         execute_no_return(
@@ -1396,6 +1514,16 @@ class TaskSupervisor:
         try:
             sse_hub.publish("task_stopping", {"task_id": task_id, "status": STATUS_STOPPING})
             sse_hub.publish("tasks_changed", {"reason": "stopping", "task_id": task_id})
+        except Exception:
+            pass
+        try:
+            write_audit_log(
+                "task_stopping",
+                f"请求停止任务 #{task_id}",
+                level="warn",
+                task_id=task_id,
+                detail={"status": STATUS_STOPPING},
+            )
         except Exception:
             pass
         try:
@@ -1485,6 +1613,16 @@ class TaskSupervisor:
             sse_hub.publish("tasks_changed", {"reason": "started", "task_id": task_id})
         except Exception:
             pass
+        try:
+            write_audit_log(
+                "task_started",
+                f"任务 #{task_id} 开始运行",
+                level="info",
+                task_id=task_id,
+                detail={"status": STATUS_RUNNING, "pid": process.pid},
+            )
+        except Exception:
+            pass
 
     def _refresh_running(self) -> None:
         finished: list[int] = []
@@ -1570,6 +1708,30 @@ class TaskSupervisor:
                     },
                 )
                 sse_hub.publish("tasks_changed", {"reason": "finished", "task_id": task_id, "status": final_status})
+            except Exception:
+                pass
+            try:
+                level = "success"
+                if final_status in {STATUS_FAILED, STATUS_STOPPED}:
+                    level = "error" if final_status == STATUS_FAILED else "warn"
+                elif final_status == STATUS_PARTIAL:
+                    level = "warn"
+                msg = f"任务 #{task_id} 结束：{final_status}"
+                if parsed.get("last_error"):
+                    msg = f"{msg} · {str(parsed.get('last_error'))[:80]}"
+                write_audit_log(
+                    "task_finished",
+                    msg,
+                    level=level,
+                    task_id=task_id,
+                    detail={
+                        "status": final_status,
+                        "exit_code": exit_code,
+                        "completed_count": parsed["completed_count"],
+                        "failed_count": parsed["failed_count"],
+                        "last_error": parsed.get("last_error") or "",
+                    },
+                )
             except Exception:
                 pass
         for task_id in finished:
@@ -1821,6 +1983,11 @@ async def api_events(request: Request, task_id: int | None = Query(default=None)
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
+@app.get("/api/audit")
+def api_audit_logs(limit: int = Query(50, ge=1, le=200), task_id: int | None = Query(default=None)) -> dict[str, Any]:
+    return {"ok": True, "items": list_audit_logs(limit=limit, task_id=task_id)}
+
+
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
     settings = read_settings()
@@ -1951,6 +2118,16 @@ def create_task(payload: TaskCreate) -> dict[str, Any]:
         sse_hub.publish("tasks_changed", {"reason": "created", "task_id": task_id})
     except Exception:
         pass
+    try:
+        write_audit_log(
+            "task_created",
+            f"创建任务 #{task_id} · {payload.name.strip()}",
+            level="info",
+            task_id=task_id,
+            detail={"name": payload.name.strip(), "count": payload.count, "status": STATUS_QUEUED},
+        )
+    except Exception:
+        pass
     return {"task": serialize_task(task_row(task_id))}
 
 
@@ -1985,6 +2162,16 @@ def delete_task(task_id: int) -> dict[str, Any]:
     try:
         sse_hub.publish("task_deleted", {"task_id": task_id})
         sse_hub.publish("tasks_changed", {"reason": "deleted", "task_id": task_id})
+    except Exception:
+        pass
+    try:
+        write_audit_log(
+            "task_deleted",
+            f"删除任务 #{task_id} · {row['name']}",
+            level="warn",
+            task_id=task_id,
+            detail={"name": row["name"], "status": row["status"]},
+        )
     except Exception:
         pass
     return {"ok": True}
@@ -2030,6 +2217,15 @@ def cleanup_tasks(payload: TaskCleanupRequest) -> dict[str, Any]:
             sse_hub.publish(
                 "tasks_changed",
                 {"reason": "cleanup", "deleted_ids": deleted_ids, "deleted_count": len(deleted_ids)},
+            )
+        except Exception:
+            pass
+        try:
+            write_audit_log(
+                "tasks_cleanup",
+                f"清理终态任务 {len(deleted_ids)} 个",
+                level="warn",
+                detail={"deleted_ids": deleted_ids, "statuses": statuses, "skipped_ids": skipped_ids},
             )
         except Exception:
             pass
