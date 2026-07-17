@@ -1342,6 +1342,341 @@ def public_defaults() -> dict[str, Any]:
     return data
 
 
+
+def collect_task_sso_tokens(task_id: int, row: sqlite3.Row | None = None) -> list[str]:
+    """Read unique SSO tokens from a task's sso directory/output files."""
+    row = row or task_row(task_id)
+    task_dir = Path(row["task_dir"])
+    candidates: list[Path] = []
+    sso_dir = task_dir / "sso"
+    if sso_dir.exists() and sso_dir.is_dir():
+        candidates.extend(sorted(sso_dir.glob("*.txt")))
+    # also allow direct output path patterns
+    candidates.append(task_dir / "sso" / f"task_{task_id}.txt")
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            value = str(line or "").strip()
+            if not value or value.startswith("#"):
+                continue
+            # JWT-ish SSO tokens usually contain two dots
+            if value.count(".") < 2 and len(value) < 20:
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            tokens.append(value)
+    return tokens
+
+
+def _normalize_grok2api_urls(login_url: str, import_url: str) -> tuple[str, str]:
+    """Rewrite old token-sink / unresolvable grok2api hosts for console container."""
+    login_url = str(login_url or "").strip()
+    import_url = str(import_url or "").strip()
+    bridge_login = "http://172.18.0.1:8000/api/admin/v1/auth/login"
+    bridge_import = "http://172.18.0.1:8000/api/admin/v1/accounts/web/import"
+
+    def needs_rewrite(url: str) -> bool:
+        value = str(url or "").strip().lower()
+        if not value:
+            return False
+        if "/v1/admin/tokens" in value:
+            return True
+        if "://grok2api" in value or value.startswith("grok2api"):
+            return True
+        return False
+
+    if needs_rewrite(login_url):
+        login_url = bridge_login
+    if needs_rewrite(import_url) or (import_url and "/v1/admin/tokens" in import_url):
+        import_url = bridge_import
+    if login_url and not import_url:
+        if login_url.endswith("/auth/login"):
+            import_url = login_url.replace("/auth/login", "/accounts/web/import")
+        elif login_url == bridge_login:
+            import_url = bridge_import
+    return login_url, import_url
+
+
+def push_sso_tokens_to_api(tokens: list[str], task_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Login to grok2api admin and multipart-import SSO tokens."""
+    defaults = merged_defaults()
+    api_defaults = dict(defaults.get("api") or {})
+    cfg_api = dict((task_config or {}).get("api") or {}) if isinstance(task_config, dict) else {}
+
+    def pick_prefer_defaults(key: str, *alts: str) -> str:
+        # Prefer system defaults for connectivity; task config may contain
+        # historical hostnames (grok2api) that console cannot resolve.
+        for source in (api_defaults, cfg_api, task_config or {}):
+            if not isinstance(source, dict):
+                continue
+            for k in (key, *alts):
+                val = str(source.get(k) or "").strip()
+                if val:
+                    return val
+        return ""
+
+    def pick_password() -> str:
+        for source in (api_defaults, cfg_api, task_config or {}):
+            if not isinstance(source, dict):
+                continue
+            for k in ("admin_password", "api_admin_password"):
+                val = str(source.get(k) or "").strip()
+                if val:
+                    return val
+        return ""
+
+    login_url = pick_prefer_defaults("endpoint", "api_endpoint")
+    import_url = pick_prefer_defaults("import_endpoint", "api_import_endpoint")
+    username = pick_prefer_defaults("admin_username", "api_admin_username") or "admin"
+    password = pick_password()
+    login_url, import_url = _normalize_grok2api_urls(login_url, import_url)
+    if not import_url and login_url:
+        import_url = login_url.replace("/auth/login", "/accounts/web/import")
+    tokens_to_push = [str(t).strip() for t in tokens if str(t).strip()]
+    if not tokens_to_push:
+        return {
+            "ok": False,
+            "error": "no_tokens",
+            "summary": "没有可入池的 SSO token",
+            "attempted": 0,
+            "created": 0,
+            "updated": 0,
+            "target": import_url or login_url or "-",
+        }
+    if not login_url or not password:
+        return {
+            "ok": False,
+            "error": "missing_api_config",
+            "summary": "缺少 login endpoint 或 admin password",
+            "attempted": len(tokens_to_push),
+            "created": 0,
+            "updated": 0,
+            "target": import_url or login_url or "-",
+        }
+    if not import_url:
+        return {
+            "ok": False,
+            "error": "missing_import_endpoint",
+            "summary": "缺少 import endpoint",
+            "attempted": len(tokens_to_push),
+            "created": 0,
+            "updated": 0,
+            "target": login_url or "-",
+        }
+
+    try:
+        login_resp = requests.post(
+            login_url,
+            json={"username": username, "password": password},
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+            verify=False,
+        )
+        if login_resp.status_code != 200:
+            return {
+                "ok": False,
+                "error": "login_failed",
+                "summary": f"admin 登录失败 HTTP {login_resp.status_code}",
+                "detail": (login_resp.text or "")[:300],
+                "attempted": len(tokens_to_push),
+                "created": 0,
+                "updated": 0,
+                "target": import_url,
+            }
+        jwt = (
+            (login_resp.json() or {})
+            .get("data", {})
+            .get("tokens", {})
+            .get("accessToken", "")
+        )
+        if not jwt:
+            return {
+                "ok": False,
+                "error": "login_no_token",
+                "summary": "admin 登录响应无 accessToken",
+                "attempted": len(tokens_to_push),
+                "created": 0,
+                "updated": 0,
+                "target": import_url,
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "login_exception",
+            "summary": f"admin 登录异常: {exc}",
+            "attempted": len(tokens_to_push),
+            "created": 0,
+            "updated": 0,
+            "target": import_url,
+        }
+
+    import tempfile
+
+    sso_text = "\n".join(tokens_to_push)
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="console_sso_retry_")
+        os.close(fd)
+        Path(tmp_path).write_text(sso_text, encoding="utf-8")
+        with open(tmp_path, "rb") as f:
+            resp = requests.post(
+                import_url,
+                headers={"Authorization": f"Bearer {jwt}"},
+                files={"files": ("grok-web-sso-tokens.txt", f, "text/plain")},
+                timeout=120,
+                verify=False,
+            )
+        created = 0
+        updated = 0
+        body = resp.text or ""
+        if resp.status_code == 200:
+            for line in body.split("\n"):
+                if line.startswith("data: ") and '"created"' in line:
+                    try:
+                        d = json.loads(line[6:])
+                        created = int(d.get("created") or 0)
+                        updated = int(d.get("updated") or 0)
+                    except Exception:
+                        pass
+            # also accept plain JSON responses
+            if created == 0 and updated == 0:
+                try:
+                    d = resp.json()
+                    if isinstance(d, dict):
+                        created = int(d.get("created") or (d.get("data") or {}).get("created") or 0)
+                        updated = int(d.get("updated") or (d.get("data") or {}).get("updated") or 0)
+                except Exception:
+                    pass
+            return {
+                "ok": True,
+                "error": "",
+                "summary": f"入池成功：新增 {created}，更新 {updated}，本轮 {len(tokens_to_push)} 个",
+                "detail": body[:500],
+                "attempted": len(tokens_to_push),
+                "created": created,
+                "updated": updated,
+                "target": import_url,
+            }
+        return {
+            "ok": False,
+            "error": "import_failed",
+            "summary": f"导入失败 HTTP {resp.status_code}",
+            "detail": body[:500],
+            "attempted": len(tokens_to_push),
+            "created": 0,
+            "updated": 0,
+            "target": import_url,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "import_exception",
+            "summary": f"导入异常: {exc}",
+            "attempted": len(tokens_to_push),
+            "created": 0,
+            "updated": 0,
+            "target": import_url,
+        }
+    finally:
+        if tmp_path and Path(tmp_path).exists():
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+
+
+def retry_task_push(task_id: int) -> dict[str, Any]:
+    row = task_row(task_id)
+    if row["status"] in ACTIVE_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="任务仍在运行中，结束后再重试入池")
+    try:
+        task_config = json.loads(row["config_json"] or "{}")
+    except Exception:
+        task_config = {}
+    tokens = collect_task_sso_tokens(task_id, row)
+    if not tokens:
+        result = {
+            "ok": False,
+            "task_id": task_id,
+            "error": "no_sso_file",
+            "summary": "任务目录中没有可重试的 SSO 文件",
+            "tokens_found": 0,
+            "attempted": 0,
+            "created": 0,
+            "updated": 0,
+            "push_gap_before": 0,
+        }
+        try:
+            write_audit_log(
+                "push_retry_failed",
+                f"任务 #{task_id} 入池重试失败：无 SSO",
+                level="error",
+                task_id=task_id,
+                detail=result,
+            )
+        except Exception:
+            pass
+        return result
+
+    # estimate gap before
+    serialized = serialize_task(row)
+    gap_before = int(serialized.get("push_gap") or 0)
+    push_result = push_sso_tokens_to_api(tokens, task_config=task_config)
+    # append a console log marker for operators
+    try:
+        console_path = Path(row["console_path"])
+        console_path.parent.mkdir(parents=True, exist_ok=True)
+        with console_path.open("a", encoding="utf-8") as f:
+            created = int(push_result.get("created") or 0)
+            updated = int(push_result.get("updated") or 0)
+            attempted = int(push_result.get("attempted") or len(tokens) or 0)
+            f.write(
+                f"\n[{now_iso()}] [console] 手动重试入池：tokens={len(tokens)} ok={push_result.get('ok')} "
+                f"{push_result.get('summary') or ''}\n"
+            )
+            if push_result.get("ok"):
+                # Match worker log format so serialize_task recomputes pushed_count/push_gap.
+                f.write(
+                    f"[*] SSO 已推送到 grok2api（新增 {created}，更新 {updated}，本轮 {attempted} 个）\n"
+                )
+    except Exception:
+        pass
+
+    out = {
+        "ok": bool(push_result.get("ok")),
+        "task_id": task_id,
+        "tokens_found": len(tokens),
+        "push_gap_before": gap_before,
+        **push_result,
+    }
+    try:
+        write_audit_log(
+            "push_retry_ok" if out["ok"] else "push_retry_failed",
+            f"任务 #{task_id} 入池重试{'成功' if out['ok'] else '失败'}：{out.get('summary') or ''}",
+            level="success" if out["ok"] else "error",
+            task_id=task_id,
+            detail={
+                "tokens_found": len(tokens),
+                "created": out.get("created"),
+                "updated": out.get("updated"),
+                "target": out.get("target"),
+                "error": out.get("error") or "",
+            },
+        )
+        sse_hub.publish("tasks_changed", {"reason": "push_retry", "task_id": task_id, "ok": out["ok"]})
+    except Exception:
+        pass
+    return out
+
+
 def serialize_task(row: sqlite3.Row) -> dict[str, Any]:
     console_path = Path(row["console_path"]) if row["console_path"] else None
     push = {
@@ -2210,6 +2545,15 @@ def get_task_logs(task_id: int, limit: int = Query(200, ge=20, le=1000)) -> dict
 def stop_task(task_id: int) -> dict[str, Any]:
     supervisor.stop_task(task_id)
     return {"ok": True}
+
+
+@app.post("/api/tasks/{task_id}/push-retry")
+def retry_task_import(task_id: int) -> dict[str, Any]:
+    """Re-import task SSO tokens into grok2api to close push gaps."""
+    result = retry_task_push(task_id)
+    # refresh serialize for latest gap estimate
+    task = serialize_task(task_row(task_id))
+    return {"ok": bool(result.get("ok")), "result": result, "task": task}
 
 
 @app.delete("/api/tasks/{task_id}")

@@ -42,6 +42,7 @@
   const formMessageEl = document.getElementById("formMessage");
   const settingsMessageEl = document.getElementById("settingsMessage");
   const stopBtnEl = document.getElementById("stopBtn");
+  const retryPushBtnEl = document.getElementById("retryPushBtn");
   const refreshBtnEl = document.getElementById("refreshBtn");
   const healthRefreshBtnEl = document.getElementById("healthRefreshBtn");
   const toggleSettingsBtnEl = document.getElementById("toggleSettingsBtn");
@@ -628,6 +629,7 @@
         ${errLine}
         <div class="task-actions">
           <span class="task-action-hint">点击查看日志</span>
+          ${gap > 0 ? `<button class="button button-secondary button-small" type="button" data-retry-push-id="${task.id}">重试入池</button>` : ""}
           <button class="button button-danger button-small" type="button" data-delete-task-id="${task.id}">删除</button>
         </div>
       </div>`;
@@ -640,7 +642,7 @@
         refreshDetail();
       };
       card.addEventListener("click", (event) => {
-        if (event.target.closest("[data-delete-task-id]")) return;
+        if (event.target.closest("[data-delete-task-id],[data-retry-push-id]")) return;
         selectTask();
       });
       card.addEventListener("keydown", (event) => {
@@ -678,13 +680,72 @@
       });
     });
 
+    taskListEl.querySelectorAll("[data-retry-push-id]").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const taskId = Number(button.dataset.retryPushId);
+        button.disabled = true;
+        try {
+          await retryTaskPush(taskId, { source: "list" });
+        } catch (error) {
+          // toast already shown
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
+
     renderOverview();
+  }
+
+
+  async function retryTaskPush(taskId, { source = "detail" } = {}) {
+    const id = Number(taskId);
+    if (!id) return;
+    const confirmed = window.confirm(`确认重试任务 #${id} 的入池推送吗？\n将读取该任务 sso 文件并重新导入 grok2api。`);
+    if (!confirmed) return;
+    try {
+      if (source === "detail" && detailTitleEl) {
+        // soft status in console meta if available
+      }
+      const data = await fetchJson(`/api/tasks/${id}/push-retry`, { method: "POST" });
+      const result = data.result || {};
+      const ok = Boolean(data.ok || result.ok);
+      const summary = result.summary || (ok ? "入池重试完成" : "入池重试失败");
+      showToast(ok ? "入池重试成功" : "入池重试失败", summary, ok ? "success" : "error");
+      if (formMessageEl && source === "list") {
+        formMessageEl.textContent = summary;
+        formMessageEl.className = ok ? "form-message" : "form-message error";
+      }
+      await refreshTasks();
+      if (state.selectedTaskId === id) {
+        await refreshDetail();
+      }
+      refreshAudit({ silent: true }).catch(() => {});
+      return data;
+    } catch (error) {
+      showToast("入池重试失败", error.message || String(error), "error");
+      if (formMessageEl) {
+        formMessageEl.textContent = error.message || String(error);
+        formMessageEl.className = "form-message error";
+      }
+      throw error;
+    }
   }
 
   function renderTaskDetail(task) {
     detailTitleEl.textContent = `任务 #${task.id} · ${task.name}`;
     stopBtnEl.disabled = !ACTIVE_STATUSES.has(task.status);
     if (downloadLogBtnEl) downloadLogBtnEl.disabled = false;
+    if (retryPushBtnEl) {
+      const gap = pushGapOf(task);
+      const canRetry = !ACTIVE_STATUSES.has(task.status) && (gap > 0 || Number(task.completed_count || 0) > 0);
+      retryPushBtnEl.disabled = !canRetry;
+      retryPushBtnEl.title = gap > 0
+        ? `有 ${gap} 个成功未入池，可重试推送`
+        : (canRetry ? "用任务 SSO 文件重新入池" : "无可重试入池的任务");
+      retryPushBtnEl.textContent = gap > 0 ? `重试入池 (${gap})` : "重试入池";
+    }
     const p = progressPercents(task);
     const gap = pushGapOf(task);
     const err = errorSummaryOf(task);
@@ -1267,7 +1328,30 @@
     }
   }
 
-  stopBtnEl.addEventListener("click", async () => {
+    if (retryPushBtnEl) {
+    retryPushBtnEl.addEventListener("click", async () => {
+      if (!state.selectedTaskId) return;
+      retryPushBtnEl.disabled = true;
+      try {
+        await retryTaskPush(state.selectedTaskId, { source: "detail" });
+      } catch (error) {
+        // toast already shown
+      } finally {
+        // re-enable based on latest task state after refresh
+        const task = (state.tasks || []).find((t) => Number(t.id) === Number(state.selectedTaskId));
+        if (task) {
+          const gap = pushGapOf(task);
+          const canRetry = !ACTIVE_STATUSES.has(task.status) && (gap > 0 || Number(task.completed_count || 0) > 0);
+          retryPushBtnEl.disabled = !canRetry;
+          retryPushBtnEl.textContent = gap > 0 ? `重试入池 (${gap})` : "重试入池";
+        } else {
+          retryPushBtnEl.disabled = false;
+        }
+      }
+    });
+  }
+
+stopBtnEl.addEventListener("click", async () => {
     if (!state.selectedTaskId) return;
     try {
       await fetchJson(`/api/tasks/${state.selectedTaskId}/stop`, { method: "POST" });
