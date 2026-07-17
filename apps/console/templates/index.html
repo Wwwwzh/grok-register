@@ -304,7 +304,10 @@
             <h2>通知与审计</h2>
             <p class="panel-desc">记录任务创建、启动、结束、删除和清理操作。完成/失败会弹出通知。</p>
           </div>
-          <button id="refreshAuditBtn" class="button button-secondary button-small" type="button">刷新</button>
+          <div class="panel-head-actions">
+            <button id="exportAuditBtn" class="button button-ghost button-small" type="button" title="按当前筛选导出 CSV">导出 CSV</button>
+            <button id="refreshAuditBtn" class="button button-secondary button-small" type="button">刷新</button>
+          </div>
         </div>
         <div class="audit-filters" id="auditFilters">
           <label class="audit-filter">
@@ -374,12 +377,25 @@
             </div>
             <div class="detail-actions">
               <button id="toggleMailBtn" class="button button-secondary" type="button">任务参数</button>
+              <button id="jumpTaskAuditBtn" class="button button-ghost" type="button" disabled title="筛选该任务的审计记录">任务审计</button>
               <button id="stopBtn" class="button button-danger" type="button" disabled>停止任务</button>
               <button id="retryPushBtn" class="button button-secondary" type="button" disabled>重试入池</button>
             </div>
           </div>
 
           <div id="detailSummary" class="summary-grid"></div>
+          <div id="taskPoolCompareBox" class="task-pool-compare hidden" aria-live="polite">
+            <div class="task-pool-compare-head">
+              <div>
+                <div class="meta-label">任务前后号池对比</div>
+                <div id="taskPoolCompareTitle" class="task-pool-compare-title">选择任务后显示</div>
+              </div>
+              <button id="refreshPoolCompareBtn" class="button button-ghost button-small" type="button" disabled>刷新对比</button>
+            </div>
+            <div id="taskPoolCompareDelta" class="task-pool-compare-delta">-</div>
+            <div id="taskPoolCompareMeta" class="task-pool-compare-meta"></div>
+            <div id="taskPoolCompareChart" class="task-pool-compare-chart" aria-hidden="true"></div>
+          </div>
           <div id="detailMeta" class="detail-grid hidden"></div>
           <div class="console-wrap">
             <div class="console-head">

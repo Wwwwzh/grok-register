@@ -73,6 +73,14 @@
   const auditListEl = document.getElementById("auditList");
   const auditMetaEl = document.getElementById("auditMeta");
   const refreshAuditBtnEl = document.getElementById("refreshAuditBtn");
+  const exportAuditBtnEl = document.getElementById("exportAuditBtn");
+  const jumpTaskAuditBtnEl = document.getElementById("jumpTaskAuditBtn");
+  const taskPoolCompareBoxEl = document.getElementById("taskPoolCompareBox");
+  const taskPoolCompareTitleEl = document.getElementById("taskPoolCompareTitle");
+  const taskPoolCompareDeltaEl = document.getElementById("taskPoolCompareDelta");
+  const taskPoolCompareMetaEl = document.getElementById("taskPoolCompareMeta");
+  const taskPoolCompareChartEl = document.getElementById("taskPoolCompareChart");
+  const refreshPoolCompareBtnEl = document.getElementById("refreshPoolCompareBtn");
   const auditLevelFilterEl = document.getElementById("auditLevelFilter");
   const auditEventFilterEl = document.getElementById("auditEventFilter");
   const auditTaskFilterEl = document.getElementById("auditTaskFilter");
@@ -681,6 +689,8 @@
             state.selectedTaskId = null;
             detailTitleEl.textContent = "实时控制台";
             detailSummaryEl.innerHTML = "";
+            if (jumpTaskAuditBtnEl) jumpTaskAuditBtnEl.disabled = true;
+            clearTaskPoolCompare();
             detailMetaEl.innerHTML = "";
             detailMetaEl.classList.add("hidden");
             consoleOutputEl.textContent = "选择任务后显示输出";
@@ -753,6 +763,13 @@
     detailTitleEl.textContent = `任务 #${task.id} · ${task.name}`;
     stopBtnEl.disabled = !ACTIVE_STATUSES.has(task.status);
     if (downloadLogBtnEl) downloadLogBtnEl.disabled = false;
+    if (jumpTaskAuditBtnEl) {
+      jumpTaskAuditBtnEl.disabled = false;
+      jumpTaskAuditBtnEl.title = `筛选任务 #${task.id} 的审计记录`;
+    }
+    if (refreshPoolCompareBtnEl) refreshPoolCompareBtnEl.disabled = false;
+    // load pool compare for this task (non-blocking)
+    loadTaskPoolCompare(task.id, { silent: true }).catch(() => {});
     if (retryPushBtnEl) {
       const gap = pushGapOf(task);
       const canRetry = !ACTIVE_STATUSES.has(task.status) && (gap > 0 || Number(task.completed_count || 0) > 0);
@@ -1088,6 +1105,154 @@
   function auditFiltersActive(filters = state.auditFilters) {
     const f = filters || {};
     return Boolean((f.level || "").trim() || (f.event || "").trim() || (f.task_id || "").trim() || (f.q || "").trim());
+  }
+
+
+  function buildAuditExportUrl(extra = {}) {
+    const filters = { ...readAuditFiltersFromUi(), ...extra };
+    const params = new URLSearchParams();
+    params.set("limit", "2000");
+    if (filters.level) params.set("level", filters.level);
+    if (filters.event) params.set("event", filters.event);
+    if (filters.task_id) params.set("task_id", filters.task_id);
+    if (filters.q) params.set("q", filters.q);
+    // keep auth token in query if present (same as other downloads)
+    const authQ = authTokenQuery();
+    if (authQ) {
+      const token = new URLSearchParams(authQ).get("token");
+      if (token) params.set("token", token);
+    }
+    return apiUrl(`/api/audit/export?${params.toString()}`);
+  }
+
+  function exportAuditCsv() {
+    const url = buildAuditExportUrl();
+    // open download in same tab context
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showToast("开始导出", "正在下载当前筛选的审计 CSV", "info", 2200);
+  }
+
+  function jumpToTaskAudit(taskId) {
+    const id = Number(taskId);
+    if (!id) return;
+    // set filter UI
+    state.auditFilters = {
+      ...(state.auditFilters || {}),
+      level: "",
+      event: "",
+      task_id: String(id),
+      q: "",
+    };
+    if (auditLevelFilterEl) auditLevelFilterEl.value = "";
+    if (auditEventFilterEl) auditEventFilterEl.value = "";
+    if (auditTaskFilterEl) auditTaskFilterEl.value = String(id);
+    if (auditQueryFilterEl) auditQueryFilterEl.value = "";
+    // scroll audit panel into view
+    const panel = document.querySelector(".panel-audit");
+    if (panel && typeof panel.scrollIntoView === "function") {
+      panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    refreshAudit({ silent: true }).then(() => {
+      showToast("已定位审计", `已筛选任务 #${id} 的审计记录`, "info", 2200);
+    }).catch(() => {});
+  }
+
+  function renderTaskPoolCompare(data) {
+    if (!taskPoolCompareBoxEl) return;
+    taskPoolCompareBoxEl.classList.remove("hidden");
+    const has = Boolean(data && data.has_compare);
+    const delta = (data && data.delta) || {};
+    const before = (data && data.before) || null;
+    const after = (data && data.after) || null;
+    const windowInfo = (data && data.window) || {};
+    if (taskPoolCompareTitleEl) {
+      if (!data) {
+        taskPoolCompareTitleEl.textContent = "加载中...";
+      } else if (!has) {
+        taskPoolCompareTitleEl.textContent = "样本不足，暂无法对比（需任务时段附近有号池采样）";
+      } else {
+        taskPoolCompareTitleEl.textContent = `总量 ${before.total || 0} → ${after.total || 0} · 变化 ${formatSigned(delta.total)}`;
+      }
+    }
+    if (taskPoolCompareDeltaEl) {
+      if (has) {
+        taskPoolCompareDeltaEl.innerHTML = [
+          `<span class="${deltaClass(delta.total)}">总量 ${formatSigned(delta.total)}</span>`,
+          `<span class="${deltaClass(delta.grok_web)}">web ${formatSigned(delta.grok_web)}</span>`,
+          `<span class="${deltaClass(delta.grok_build)}">build ${formatSigned(delta.grok_build)}</span>`,
+          `<span class="${deltaClass(delta.grok_console)}">console ${formatSigned(delta.grok_console)}</span>`,
+        ].join("");
+      } else {
+        taskPoolCompareDeltaEl.textContent = "—";
+      }
+    }
+    if (taskPoolCompareMetaEl) {
+      const bits = [];
+      if (windowInfo.anchor_start) bits.push(`任务开始 ${windowInfo.anchor_start}`);
+      if (windowInfo.finished_at) bits.push(`结束 ${windowInfo.finished_at}`);
+      else if (windowInfo.anchor_end) bits.push(`截至 ${windowInfo.anchor_end}`);
+      if (before && before.ts) bits.push(`前采样 ${before.ts}`);
+      if (after && after.ts) bits.push(`后采样 ${after.ts}`);
+      taskPoolCompareMetaEl.textContent = bits.join(" · ") || "等待对比数据";
+    }
+    if (taskPoolCompareChartEl) {
+      const points = (data && data.points) || [];
+      if (points.length < 2) {
+        taskPoolCompareChartEl.innerHTML = `<div class="task-pool-compare-empty">${has ? "区间样本较少" : "健康检测采样后可对比任务前后号池"}</div>`;
+      } else {
+        const width = 360;
+        const height = 84;
+        const series = [
+          { key: "total", color: "#b4472b", width: 2.2 },
+          { key: "grok_web", color: "#2857b5", width: 1.5 },
+          { key: "grok_build", color: "#2f7d48", width: 1.5 },
+          { key: "grok_console", color: "#8f5b00", width: 1.5 },
+        ];
+        const paths = series.map((s) => {
+          const d = sparklinePath(points.map((p) => p[s.key] || 0), width, height);
+          return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.width}" stroke-linecap="round" stroke-linejoin="round"></path>`;
+        }).join("");
+        taskPoolCompareChartEl.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="任务号池对比趋势">${paths}</svg>`;
+      }
+    }
+  }
+
+  async function loadTaskPoolCompare(taskId, { silent = false } = {}) {
+    const id = Number(taskId);
+    if (!id) return null;
+    if (refreshPoolCompareBtnEl) refreshPoolCompareBtnEl.disabled = false;
+    if (taskPoolCompareBoxEl) taskPoolCompareBoxEl.classList.remove("hidden");
+    if (taskPoolCompareTitleEl && !silent) taskPoolCompareTitleEl.textContent = "加载对比中...";
+    try {
+      const data = await fetchJson(`/api/tasks/${id}/pool-compare`);
+      renderTaskPoolCompare(data);
+      return data;
+    } catch (error) {
+      if (taskPoolCompareTitleEl) {
+        taskPoolCompareTitleEl.textContent = silent ? "对比暂不可用" : `对比加载失败: ${error.message}`;
+      }
+      if (taskPoolCompareDeltaEl) taskPoolCompareDeltaEl.textContent = "—";
+      if (taskPoolCompareMetaEl) taskPoolCompareMetaEl.textContent = error.message || String(error);
+      if (taskPoolCompareChartEl) {
+        taskPoolCompareChartEl.innerHTML = `<div class="task-pool-compare-empty">加载失败</div>`;
+      }
+      return null;
+    }
+  }
+
+  function clearTaskPoolCompare() {
+    if (taskPoolCompareBoxEl) taskPoolCompareBoxEl.classList.add("hidden");
+    if (refreshPoolCompareBtnEl) refreshPoolCompareBtnEl.disabled = true;
+    if (taskPoolCompareTitleEl) taskPoolCompareTitleEl.textContent = "选择任务后显示";
+    if (taskPoolCompareDeltaEl) taskPoolCompareDeltaEl.textContent = "-";
+    if (taskPoolCompareMetaEl) taskPoolCompareMetaEl.textContent = "";
+    if (taskPoolCompareChartEl) taskPoolCompareChartEl.innerHTML = "";
   }
 
   function buildAuditQuery(extra = {}) {
@@ -1479,6 +1644,8 @@
         state.selectedTaskId = null;
         detailTitleEl.textContent = "实时控制台";
         detailSummaryEl.innerHTML = "";
+        if (jumpTaskAuditBtnEl) jumpTaskAuditBtnEl.disabled = true;
+        clearTaskPoolCompare();
         detailMetaEl.innerHTML = "";
         detailMetaEl.classList.add("hidden");
         consoleOutputEl.textContent = "选择任务后显示输出";
@@ -1728,6 +1895,27 @@ stopBtnEl.addEventListener("click", async () => {
   }
   if (refreshAuditBtnEl) {
     refreshAuditBtnEl.addEventListener("click", () => refreshAudit({ silent: false }));
+  }
+  if (exportAuditBtnEl) {
+    exportAuditBtnEl.addEventListener("click", () => {
+      try {
+        exportAuditCsv();
+      } catch (error) {
+        showToast("导出失败", error.message || String(error), "error");
+      }
+    });
+  }
+  if (jumpTaskAuditBtnEl) {
+    jumpTaskAuditBtnEl.addEventListener("click", () => {
+      if (!state.selectedTaskId) return;
+      jumpToTaskAudit(state.selectedTaskId);
+    });
+  }
+  if (refreshPoolCompareBtnEl) {
+    refreshPoolCompareBtnEl.addEventListener("click", () => {
+      if (!state.selectedTaskId) return;
+      loadTaskPoolCompare(state.selectedTaskId, { silent: false });
+    });
   }
   if (auditLevelFilterEl) {
     auditLevelFilterEl.addEventListener("change", () => {

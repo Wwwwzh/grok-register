@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
 import re
@@ -20,7 +22,7 @@ from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -867,7 +869,7 @@ def list_audit_logs(
     event: str | None = None,
     q: str | None = None,
 ) -> list[dict[str, Any]]:
-    limit = max(1, min(int(limit or 50), 200))
+    limit = max(1, min(int(limit or 50), 2000))
     clauses: list[str] = []
     params: list[Any] = []
 
@@ -1164,6 +1166,121 @@ def build_pool_trend(limit: int = 72, range_key: str | None = None) -> dict[str,
         },
         "range": range_name,
         "available_ranges": list(POOL_TREND_RANGES.keys()),
+    }
+
+
+
+def _pool_point_at_or_before(history: list[dict[str, Any]], ts: float | None) -> dict[str, Any] | None:
+    """Nearest snapshot at or before ts; if none, first snapshot after ts."""
+    if not history or ts is None:
+        return None
+    timed: list[tuple[float, dict[str, Any]]] = []
+    for item in history:
+        item_ts = _parse_iso_ts(str(item.get("ts") or ""))
+        if item_ts is None:
+            continue
+        timed.append((item_ts, item))
+    if not timed:
+        return None
+    timed.sort(key=lambda x: x[0])
+    before = [p for p in timed if p[0] <= ts]
+    if before:
+        return before[-1][1]
+    # fallback: first after
+    after = [p for p in timed if p[0] > ts]
+    return after[0][1] if after else None
+
+
+def _pool_point_at_or_after(history: list[dict[str, Any]], ts: float | None) -> dict[str, Any] | None:
+    if not history or ts is None:
+        return None
+    timed: list[tuple[float, dict[str, Any]]] = []
+    for item in history:
+        item_ts = _parse_iso_ts(str(item.get("ts") or ""))
+        if item_ts is None:
+            continue
+        timed.append((item_ts, item))
+    if not timed:
+        return None
+    timed.sort(key=lambda x: x[0])
+    after = [p for p in timed if p[0] >= ts]
+    if after:
+        return after[0][1]
+    before = [p for p in timed if p[0] < ts]
+    return before[-1][1] if before else None
+
+
+def _pool_metric_view(point: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(point, dict):
+        return None
+    return {
+        "ts": point.get("ts"),
+        "total": int(point.get("total") or 0),
+        "grok_web": int(point.get("grok_web") or 0),
+        "grok_build": int(point.get("grok_build") or 0),
+        "grok_console": int(point.get("grok_console") or 0),
+    }
+
+
+def build_task_pool_compare(task_id: int) -> dict[str, Any]:
+    """Compare pool snapshots around a task's start/finish window."""
+    row = task_row(task_id)
+    started_at = str(row["started_at"] or "").strip()
+    finished_at = str(row["finished_at"] or "").strip()
+    created_at = str(row["created_at"] or "").strip()
+    start_ts = _parse_iso_ts(started_at) or _parse_iso_ts(created_at)
+    end_ts = _parse_iso_ts(finished_at) or datetime.now().timestamp()
+
+    history = read_pool_history()
+    before = _pool_point_at_or_before(history, start_ts)
+    after = _pool_point_at_or_after(history, end_ts)
+    # if task still running and end == now, after may equal latest
+    if after is None and history:
+        after = history[-1]
+    if before is None and history and start_ts is not None:
+        # last resort first point
+        before = history[0]
+
+    before_view = _pool_metric_view(before)
+    after_view = _pool_metric_view(after)
+    keys = ("total", "grok_web", "grok_build", "grok_console")
+    delta = {k: 0 for k in keys}
+    if before_view and after_view:
+        delta = {k: int(after_view.get(k) or 0) - int(before_view.get(k) or 0) for k in keys}
+
+    # mid-window points for a tiny sparkline
+    mid_points: list[dict[str, Any]] = []
+    if start_ts is not None:
+        for item in history:
+            ts = _parse_iso_ts(str(item.get("ts") or ""))
+            if ts is None:
+                continue
+            if start_ts - 5 * 60 <= ts <= end_ts + 5 * 60:
+                mid_points.append(_pool_metric_view(item) or {})
+        # keep light
+        if len(mid_points) > 60:
+            step = max(1, len(mid_points) // 60)
+            mid_points = mid_points[::step][:60]
+
+    return {
+        "ok": True,
+        "task_id": int(task_id),
+        "task_name": row["name"],
+        "status": row["status"],
+        "window": {
+            "started_at": started_at or created_at or None,
+            "finished_at": finished_at or None,
+            "from_ts": before_view.get("ts") if before_view else None,
+            "to_ts": after_view.get("ts") if after_view else None,
+            "anchor_start": started_at or created_at or None,
+            "anchor_end": finished_at or now_iso(),
+        },
+        "before": before_view,
+        "after": after_view,
+        "delta": delta,
+        "points": mid_points,
+        "sample_count": len(history),
+        "has_compare": bool(before_view and after_view),
     }
 
 
@@ -2373,6 +2490,12 @@ def api_pool_trend(
     return {"ok": True, **trend}
 
 
+
+@app.get("/api/tasks/{task_id}/pool-compare")
+def api_task_pool_compare(task_id: int) -> dict[str, Any]:
+    """Pool totals before/after a task window for trend comparison."""
+    return build_task_pool_compare(task_id)
+
 @app.get("/api/events")
 async def api_events(request: Request, task_id: int | None = Query(default=None)):
     """Server-Sent Events stream for live console updates.
@@ -2455,6 +2578,46 @@ def api_audit_logs(
         },
         "event_names": list_audit_event_names(limit=40),
     }
+
+
+@app.get("/api/audit/export")
+def api_audit_export(
+    limit: int = Query(500, ge=1, le=2000),
+    task_id: int | None = Query(default=None),
+    level: str | None = Query(default=None),
+    event: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+) -> Response:
+    """Export filtered audit logs as CSV (UTF-8 BOM for Excel)."""
+    items = list_audit_logs(limit=limit, task_id=task_id, level=level, event=event, q=q)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["id", "created_at", "level", "event", "task_id", "message", "detail_json"])
+    for item in items:
+        detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+        try:
+            detail_json = json.dumps(detail or {}, ensure_ascii=False)
+        except Exception:
+            detail_json = "{}"
+        writer.writerow(
+            [
+                item.get("id") or "",
+                item.get("created_at") or "",
+                item.get("level") or "",
+                item.get("event") or "",
+                "" if item.get("task_id") is None else item.get("task_id"),
+                item.get("message") or "",
+                detail_json,
+            ]
+        )
+    # BOM helps Excel open UTF-8 Chinese correctly
+    payload = "\ufeff" + buf.getvalue()
+    filename = f"audit-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    }
+    return Response(content=payload, media_type="text/csv; charset=utf-8", headers=headers)
 
 
 @app.get("/api/settings")
