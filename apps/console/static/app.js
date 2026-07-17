@@ -29,6 +29,7 @@
       to: "",
       manual: false,
     },
+    activeTab: "tasks",
     seenAuditIds: {},
     sseConnected: false,
     sseMode: "connecting", // live | polling | connecting | unsupported
@@ -129,13 +130,65 @@
       .replaceAll(">", "&gt;");
   }
 
-  function setSettingsOpen(open) {
-    settingsFormEl.classList.toggle("hidden", !open);
-    const label = open ? "收起配置" : "展开配置";
-    const topLabel = open ? "收起设置" : "系统设置";
-    if (toggleSettingsHeadBtnEl) toggleSettingsHeadBtnEl.textContent = label;
-    if (toggleSettingsBtnEl) toggleSettingsBtnEl.textContent = topLabel;
+  
+  const TAB_KEYS = ["tasks", "create", "health", "audit", "settings"];
+  const TAB_STORAGE_KEY = "console_active_tab";
+
+  function normalizeTab(tab) {
+    const key = String(tab || "").trim().toLowerCase();
+    return TAB_KEYS.includes(key) ? key : "tasks";
   }
+
+  function setActiveTab(tab, { persist = true, force = false } = {}) {
+    const next = normalizeTab(tab);
+    if (!force && state.activeTab === next) {
+      // still ensure DOM sync
+    }
+    state.activeTab = next;
+    document.querySelectorAll(".console-nav-item[data-tab]").forEach((btn) => {
+      const active = btn.getAttribute("data-tab") === next;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    document.querySelectorAll("[data-tab-panel]").forEach((panel) => {
+      const active = panel.getAttribute("data-tab-panel") === next;
+      panel.classList.toggle("is-active", active);
+      if (active) panel.removeAttribute("hidden");
+      else panel.setAttribute("hidden", "");
+    });
+    if (persist) {
+      try { localStorage.setItem(TAB_STORAGE_KEY, next); } catch (e) {}
+    }
+    // Lazy refresh when entering certain tabs
+    if (next === "health") {
+      try { loadPoolTrend(state.poolTrendRange || "6h", { silent: true }); } catch (e) {}
+      try { refreshHealth(); } catch (e) {}
+    } else if (next === "audit") {
+      try { refreshAudit({ silent: true }); } catch (e) {}
+    } else if (next === "tasks") {
+      try { refreshTasks(); } catch (e) {}
+    } else if (next === "settings") {
+      if (settingsFormEl) settingsFormEl.classList.remove("hidden");
+    }
+    return next;
+  }
+
+  function getSavedTab() {
+    try {
+      return normalizeTab(localStorage.getItem(TAB_STORAGE_KEY) || "tasks");
+    } catch (e) {
+      return "tasks";
+    }
+  }
+
+function setSettingsOpen(open) {
+    if (open) setActiveTab("settings");
+    // Keep form visible in settings tab; legacy callers still work.
+    if (settingsFormEl) settingsFormEl.classList.remove("hidden");
+    if (toggleSettingsHeadBtnEl) toggleSettingsHeadBtnEl.textContent = "系统设置";
+    if (toggleSettingsBtnEl) toggleSettingsBtnEl.textContent = "系统设置";
+  }
+
 
   function setDefaults() {
     const defaults = window.__DEFAULTS__ || {};
@@ -1220,6 +1273,7 @@
   function jumpToTaskAudit(taskId) {
     const id = Number(taskId);
     if (!id) return;
+    setActiveTab("audit");
     // set filter UI
     state.auditFilters = {
       ...(state.auditFilters || {}),
@@ -1731,6 +1785,7 @@
     state.selectedTaskId = data.task.id;
     formMessageEl.textContent = `任务 #${data.task.id} 已创建`;
     formMessageEl.className = "form-message success";
+    setActiveTab("tasks");
     await refreshAll();
   }
 
@@ -1829,7 +1884,10 @@ stopBtnEl.addEventListener("click", async () => {
   });
 
   refreshBtnEl.addEventListener("click", refreshAll);
-  healthRefreshBtnEl.addEventListener("click", refreshHealth);
+  healthRefreshBtnEl.addEventListener("click", () => {
+    setActiveTab("health");
+    refreshHealth();
+  });
 
   settingsFormEl.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1879,10 +1937,31 @@ stopBtnEl.addEventListener("click", async () => {
   });
 
   function toggleSettings() {
-    setSettingsOpen(settingsFormEl.classList.contains("hidden"));
+    setActiveTab("settings");
   }
   if (toggleSettingsBtnEl) toggleSettingsBtnEl.addEventListener("click", toggleSettings);
   if (toggleSettingsHeadBtnEl) toggleSettingsHeadBtnEl.addEventListener("click", toggleSettings);
+
+  // Top-level tab navigation
+  const consoleNavEl = document.getElementById("consoleNav");
+  if (consoleNavEl) {
+    consoleNavEl.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-tab]");
+      if (!btn || !consoleNavEl.contains(btn)) return;
+      setActiveTab(btn.getAttribute("data-tab"));
+    });
+  }
+  document.querySelectorAll("[data-nav-tab]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      // settings button already handled; support generic nav hooks
+      const tab = el.getAttribute("data-nav-tab");
+      if (!tab) return;
+      // avoid double-handling if it's the settings toggle
+      if (el.id === "toggleSettingsBtn") return;
+      event.preventDefault();
+      setActiveTab(tab);
+    });
+  });
 
   toggleMailBtnEl.addEventListener("click", () => {
     detailMetaEl.classList.toggle("hidden");
@@ -2103,7 +2182,7 @@ stopBtnEl.addEventListener("click", async () => {
   applyTheme(getPreferredTheme(), { persist: false });
 
   setDefaults();
-  setSettingsOpen(false);
+  setActiveTab(getSavedTab(), { persist: false, force: true });
   refreshTemplates().catch((error) => {
     formMessageEl.textContent = error.message;
     formMessageEl.className = "form-message error";

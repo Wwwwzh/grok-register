@@ -84,6 +84,111 @@ body {
   grid-template-columns: 1fr;
 }
 
+/* ===== Console tab navigation ===== */
+.console-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel, #fffaf1) 92%, #fff);
+  box-shadow: 0 8px 20px rgba(58, 36, 15, 0.04);
+  position: sticky;
+  top: 10px;
+  z-index: 20;
+}
+
+.console-nav-item {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 10px 14px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.console-nav-item:hover {
+  color: var(--ink, #1f1a14);
+  background: color-mix(in srgb, #fff 70%, transparent);
+}
+
+.console-nav-item.is-active {
+  color: var(--accent-dark, #7f2f1b);
+  background: #fff;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+  box-shadow: 0 0 0 3px rgba(180, 71, 43, 0.10);
+}
+
+.console-nav-item:focus-visible {
+  outline: 3px solid rgba(180, 71, 43, 0.28);
+  outline-offset: 2px;
+}
+
+.tab-panel[hidden] {
+  display: none !important;
+}
+
+.tab-panel {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.tab-panel.is-active {
+  display: grid;
+}
+
+.panel-form-solo,
+.tab-panel[data-tab-panel="health"] > .panel,
+.tab-panel[data-tab-panel="audit"] > .panel,
+.tab-panel[data-tab-panel="settings"] > .panel {
+  max-width: 1100px;
+}
+
+.tab-panel[data-tab-panel="tasks"] > .workspace {
+  margin: 0;
+}
+
+html[data-theme="dark"] .console-nav {
+  background: rgba(255,255,255,0.03);
+  box-shadow: none;
+}
+
+html[data-theme="dark"] .console-nav-item:hover {
+  background: rgba(255,255,255,0.04);
+  color: var(--ink, #f5efe6);
+}
+
+html[data-theme="dark"] .console-nav-item.is-active {
+  background: rgba(255,255,255,0.06);
+  color: #f0c2b4;
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  box-shadow: none;
+}
+
+@media (max-width: 820px) {
+  .console-nav {
+    top: 0;
+    border-radius: 14px;
+    gap: 6px;
+    padding: 6px;
+  }
+  .console-nav-item {
+    flex: 1 1 calc(33.33% - 6px);
+    text-align: center;
+    padding: 10px 8px;
+    font-size: 13px;
+  }
+}
+
+
+
 .overview {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -1920,3 +2025,21 @@ html[data-theme="dark"] .task-card-pool-delta.down {
   }
 }
 
+
+
+/* Tab content width tweaks */
+.tab-panel[data-tab-panel="tasks"] .workspace {
+  width: 100%;
+  max-width: none;
+}
+
+.tab-panel[data-tab-panel="create"] .panel-form-solo,
+.tab-panel[data-tab-panel="settings"] .panel-settings {
+  width: 100%;
+}
+
+.tab-panel[data-tab-panel="health"] .panel-health,
+.tab-panel[data-tab-panel="audit"] .panel-audit {
+  width: 100%;
+  max-width: none;
+}

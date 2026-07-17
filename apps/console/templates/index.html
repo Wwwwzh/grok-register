@@ -35,12 +35,12 @@
         <button id="themeToggleBtn" class="button button-ghost" type="button" aria-pressed="false" title="切换亮/暗主题">暗色模式</button>
         <button id="refreshBtn" class="button button-ghost" type="button">刷新任务</button>
         <button id="healthRefreshBtn" class="button button-ghost" type="button">重新检测</button>
-        <button id="toggleSettingsBtn" class="button button-secondary" type="button">系统设置</button>
+        <button id="toggleSettingsBtn" class="button button-secondary" type="button" data-nav-tab="settings">系统设置</button>
       </div>
     </header>
 
     <main class="main">
-      <section class="overview" id="overviewStrip" aria-label="总览">
+<section class="overview" id="overviewStrip" aria-label="总览">
         <div class="overview-card">
           <div class="meta-label">并发上限</div>
           <div class="overview-value" id="maxConcurrentValue">{{ max_concurrent_tasks }}</div>
@@ -68,97 +68,111 @@
         </div>
       </section>
 
-      <section class="panel panel-settings collapsible-panel">
-        <div class="panel-head">
-          <div>
-            <div class="eyebrow">System Settings</div>
-            <h2>系统默认配置</h2>
-            <p class="panel-desc">全局默认值。新建任务不展开高级设置时，直接使用这里的配置。</p>
+      <nav class="console-nav" id="consoleNav" aria-label="控制台分区">
+        <button type="button" class="console-nav-item is-active" data-tab="tasks" aria-selected="true">任务</button>
+        <button type="button" class="console-nav-item" data-tab="create" aria-selected="false">新建</button>
+        <button type="button" class="console-nav-item" data-tab="health" aria-selected="false">健康</button>
+        <button type="button" class="console-nav-item" data-tab="audit" aria-selected="false">审计</button>
+        <button type="button" class="console-nav-item" data-tab="settings" aria-selected="false">设置</button>
+      </nav>
+
+      <section class="tab-panel is-active" data-tab-panel="tasks" id="tab-tasks">
+<section class="workspace">
+        <section class="panel panel-tasks">
+          <div class="panel-head">
+            <div>
+              <div class="eyebrow">Tasks</div>
+              <h2>任务栏</h2>
+              <p class="panel-desc">点击任务卡查看日志。删除只清控制台记录和任务目录。</p>
+            </div>
           </div>
-          <button id="toggleSettingsHeadBtn" class="button button-secondary" type="button">展开配置</button>
-        </div>
-
-        <form id="settingsForm" class="task-form hidden">
-          <div class="form-section-title full">调度</div>
-          <label>
-            <span>任务并发上限</span>
-            <small>同时运行的注册任务数。默认 1；最高 {{ max_concurrent_tasks_cap }}。</small>
-            <input name="max_concurrent_tasks" type="number" min="1" max="{{ max_concurrent_tasks_cap }}" step="1" value="{{ max_concurrent_tasks }}">
-          </label>
-
-          <div class="form-section-title full">代理</div>
-          <label>
-            <span>浏览器代理</span>
-            <small>浏览器访问 x.ai 时走的代理。</small>
-            <input name="browser_proxy" placeholder="例如 socks5://warp:1080">
-          </label>
-          <label>
-            <span>请求代理</span>
-            <small>邮箱 API 等普通 HTTP 请求代理，不填则直连。</small>
-            <input name="proxy" placeholder="例如 socks5://warp:1080">
-          </label>
-
-          <div class="form-section-title full">临时邮箱</div>
-          <label>
-            <span>邮箱 API Base</span>
-            <small>Temp Mail / DuckMail 接口地址。</small>
-            <input name="temp_mail_api_base" placeholder="https://api.duckmail.sbs">
-          </label>
-          <label>
-            <span>邮箱域名</span>
-            <small>注册时使用的邮箱后缀。</small>
-            <input name="temp_mail_domain" placeholder="example.com">
-          </label>
-          <label>
-            <span>邮箱管理口令 / DuckMail API Key</span>
-            <small>自定义 Temp Mail 管理口令，或 DuckMail API Key。</small>
-            <input name="temp_mail_admin_password" placeholder="admin password / dk_xxx">
-          </label>
-          <label>
-            <span>站点密码</span>
-            <small>邮箱 API 额外站点鉴权（可选）。</small>
-            <input name="temp_mail_site_password" placeholder="optional">
-          </label>
-
-          <div class="form-section-title full">入池 / grok2api</div>
-          <label>
-            <span>Admin Login 接口</span>
-            <small>管理登录地址，用于鉴权与号池统计。</small>
-            <input name="api_endpoint" placeholder="http://172.18.0.1:8000/api/admin/v1/auth/login">
-          </label>
-          <label>
-            <span>Import 接口</span>
-            <small>SSO 入池地址。</small>
-            <input name="api_import_endpoint" placeholder="http://172.18.0.1:8000/api/admin/v1/accounts/web/import">
-          </label>
-          <label>
-            <span>Admin 用户名</span>
-            <small>grok2api 管理后台用户名。</small>
-            <input name="api_admin_username" placeholder="admin">
-          </label>
-          <label>
-            <span>Admin 密码</span>
-            <small>留空保存表示沿用已有密码。</small>
-            <input name="api_admin_password" type="password" placeholder="留空则沿用已有密码" autocomplete="new-password">
-          </label>
-          <label>
-            <span>API Token（兼容旧字段）</span>
-            <small>旧 token-sink 用；新 grok2api 可留空。</small>
-            <input name="api_token" placeholder="optional legacy token">
-          </label>
-          <label class="checkbox-row">
-            <input name="api_append" type="checkbox" checked>
-            <span>追加写入 token</span>
-          </label>
-          <div class="form-actions full">
-            <button class="button" type="submit">保存默认配置</button>
-            <div id="settingsMessage" class="form-message"></div>
+          <div class="task-toolbar">
+            <div class="task-filters" id="taskFilters" role="tablist" aria-label="任务过滤">
+              <button type="button" class="chip active" data-filter="all">全部</button>
+              <button type="button" class="chip" data-filter="active">进行中</button>
+              <button type="button" class="chip" data-filter="done">已完成</button>
+              <button type="button" class="chip" data-filter="failed">失败/部分</button>
+            </div>
+            <div class="task-tools">
+              <input id="taskSearchInput" class="task-search" type="search" placeholder="搜索 ID / 名称" autocomplete="off">
+              <div class="cleanup-group">
+                <button id="cleanupDoneBtn" class="button button-secondary button-small" type="button">清理已完成</button>
+                <button id="cleanupFailedBtn" class="button button-secondary button-small" type="button">清理失败/部分</button>
+                <button id="cleanupAllTerminalBtn" class="button button-danger button-small" type="button">清理全部终态</button>
+              </div>
+              <div id="taskListMeta" class="task-list-meta">0 个任务</div>
+            </div>
           </div>
-        </form>
+          <div id="taskList" class="task-list"></div>
+        </section>
+
+        <section class="panel panel-detail">
+          <div class="panel-head">
+            <div>
+              <div class="eyebrow">Live Detail</div>
+              <h2 id="detailTitle">实时控制台</h2>
+            </div>
+            <div class="detail-actions">
+              <button id="toggleMailBtn" class="button button-secondary" type="button">任务参数</button>
+              <button id="jumpTaskAuditBtn" class="button button-ghost" type="button" disabled title="筛选该任务的审计记录">任务审计</button>
+              <button id="stopBtn" class="button button-danger" type="button" disabled>停止任务</button>
+              <button id="retryPushBtn" class="button button-secondary" type="button" disabled>重试入池</button>
+            </div>
+          </div>
+
+          <div id="detailSummary" class="summary-grid"></div>
+          <div id="taskPoolCompareBox" class="task-pool-compare hidden" aria-live="polite">
+            <div class="task-pool-compare-head">
+              <div class="task-pool-compare-heading">
+                <div class="meta-label">任务前后号池对比</div>
+                <div id="taskPoolCompareTitle" class="task-pool-compare-title">选择任务后显示</div>
+              </div>
+              <div class="task-pool-compare-actions">
+                <button id="resetPoolCompareWindowBtn" class="button button-ghost button-small" type="button" disabled title="恢复任务默认起止时间">默认窗口</button>
+                <button id="refreshPoolCompareBtn" class="button button-ghost button-small" type="button" disabled>刷新对比</button>
+              </div>
+            </div>
+            <div class="task-pool-compare-window">
+              <label class="task-pool-compare-field">
+                <span>开始</span>
+                <input id="poolCompareFrom" class="input input-compact" type="datetime-local" />
+              </label>
+              <span class="task-pool-compare-sep" aria-hidden="true">→</span>
+              <label class="task-pool-compare-field">
+                <span>结束</span>
+                <input id="poolCompareTo" class="input input-compact" type="datetime-local" />
+              </label>
+              <div class="task-pool-compare-window-actions">
+                <button id="applyPoolCompareWindowBtn" class="button button-secondary button-small" type="button" disabled>应用时间窗</button>
+              </div>
+            </div>
+            <div id="taskPoolCompareDelta" class="task-pool-compare-delta">-</div>
+            <div id="taskPoolCompareMeta" class="task-pool-compare-meta"></div>
+            <div id="taskPoolCompareChart" class="task-pool-compare-chart" aria-hidden="true"></div>
+          </div>
+          <div id="detailMeta" class="detail-grid hidden"></div>
+          <div class="console-wrap">
+            <div class="console-head">
+              <div class="console-head-left">
+                <span>实时控制台日志</span>
+                <span id="consoleMeta" class="console-meta">选择任务后显示输出</span>
+              </div>
+              <div class="console-head-actions">
+                <label class="console-toggle">
+                  <input id="autoScrollToggle" type="checkbox" checked>
+                  <span>自动滚动</span>
+                </label>
+                <button id="downloadLogBtn" class="button button-secondary button-small" type="button" disabled>下载日志</button>
+              </div>
+            </div>
+            <pre id="consoleOutput" class="console-output">选择任务后显示输出</pre>
+          </div>
+        </section>
+      </section>
       </section>
 
-      <section class="ops-grid">
-        <section class="panel panel-form">
+      <section class="tab-panel" data-tab-panel="create" id="tab-create" hidden>
+<section class="panel panel-form panel-form-solo">
           <div class="panel-head">
             <div>
               <div class="eyebrow">Create Task</div>
@@ -262,8 +276,10 @@
             <div id="preflightBox" class="preflight-box full hidden"></div>
           </form>
         </section>
+      </section>
 
-        <section class="panel panel-health">
+      <section class="tab-panel" data-tab-panel="health" id="tab-health" hidden>
+<section class="panel panel-health">
           <div class="panel-head">
             <div>
               <div class="eyebrow">Health</div>
@@ -297,7 +313,8 @@
         </section>
       </section>
 
-      <section class="panel panel-audit">
+      <section class="tab-panel" data-tab-panel="audit" id="tab-audit" hidden>
+<section class="panel panel-audit">
         <div class="panel-head">
           <div>
             <div class="eyebrow">Audit</div>
@@ -354,100 +371,98 @@
         <div id="auditMeta" class="health-meta">等待加载</div>
         <div id="auditList" class="audit-list"></div>
       </section>
-
-      <section class="workspace">
-        <section class="panel panel-tasks">
-          <div class="panel-head">
-            <div>
-              <div class="eyebrow">Tasks</div>
-              <h2>任务栏</h2>
-              <p class="panel-desc">点击任务卡查看日志。删除只清控制台记录和任务目录。</p>
-            </div>
-          </div>
-          <div class="task-toolbar">
-            <div class="task-filters" id="taskFilters" role="tablist" aria-label="任务过滤">
-              <button type="button" class="chip active" data-filter="all">全部</button>
-              <button type="button" class="chip" data-filter="active">进行中</button>
-              <button type="button" class="chip" data-filter="done">已完成</button>
-              <button type="button" class="chip" data-filter="failed">失败/部分</button>
-            </div>
-            <div class="task-tools">
-              <input id="taskSearchInput" class="task-search" type="search" placeholder="搜索 ID / 名称" autocomplete="off">
-              <div class="cleanup-group">
-                <button id="cleanupDoneBtn" class="button button-secondary button-small" type="button">清理已完成</button>
-                <button id="cleanupFailedBtn" class="button button-secondary button-small" type="button">清理失败/部分</button>
-                <button id="cleanupAllTerminalBtn" class="button button-danger button-small" type="button">清理全部终态</button>
-              </div>
-              <div id="taskListMeta" class="task-list-meta">0 个任务</div>
-            </div>
-          </div>
-          <div id="taskList" class="task-list"></div>
-        </section>
-
-        <section class="panel panel-detail">
-          <div class="panel-head">
-            <div>
-              <div class="eyebrow">Live Detail</div>
-              <h2 id="detailTitle">实时控制台</h2>
-            </div>
-            <div class="detail-actions">
-              <button id="toggleMailBtn" class="button button-secondary" type="button">任务参数</button>
-              <button id="jumpTaskAuditBtn" class="button button-ghost" type="button" disabled title="筛选该任务的审计记录">任务审计</button>
-              <button id="stopBtn" class="button button-danger" type="button" disabled>停止任务</button>
-              <button id="retryPushBtn" class="button button-secondary" type="button" disabled>重试入池</button>
-            </div>
-          </div>
-
-          <div id="detailSummary" class="summary-grid"></div>
-          <div id="taskPoolCompareBox" class="task-pool-compare hidden" aria-live="polite">
-            <div class="task-pool-compare-head">
-              <div class="task-pool-compare-heading">
-                <div class="meta-label">任务前后号池对比</div>
-                <div id="taskPoolCompareTitle" class="task-pool-compare-title">选择任务后显示</div>
-              </div>
-              <div class="task-pool-compare-actions">
-                <button id="resetPoolCompareWindowBtn" class="button button-ghost button-small" type="button" disabled title="恢复任务默认起止时间">默认窗口</button>
-                <button id="refreshPoolCompareBtn" class="button button-ghost button-small" type="button" disabled>刷新对比</button>
-              </div>
-            </div>
-            <div class="task-pool-compare-window">
-              <label class="task-pool-compare-field">
-                <span>开始</span>
-                <input id="poolCompareFrom" class="input input-compact" type="datetime-local" />
-              </label>
-              <span class="task-pool-compare-sep" aria-hidden="true">→</span>
-              <label class="task-pool-compare-field">
-                <span>结束</span>
-                <input id="poolCompareTo" class="input input-compact" type="datetime-local" />
-              </label>
-              <div class="task-pool-compare-window-actions">
-                <button id="applyPoolCompareWindowBtn" class="button button-secondary button-small" type="button" disabled>应用时间窗</button>
-              </div>
-            </div>
-            <div id="taskPoolCompareDelta" class="task-pool-compare-delta">-</div>
-            <div id="taskPoolCompareMeta" class="task-pool-compare-meta"></div>
-            <div id="taskPoolCompareChart" class="task-pool-compare-chart" aria-hidden="true"></div>
-          </div>
-          <div id="detailMeta" class="detail-grid hidden"></div>
-          <div class="console-wrap">
-            <div class="console-head">
-              <div class="console-head-left">
-                <span>实时控制台日志</span>
-                <span id="consoleMeta" class="console-meta">选择任务后显示输出</span>
-              </div>
-              <div class="console-head-actions">
-                <label class="console-toggle">
-                  <input id="autoScrollToggle" type="checkbox" checked>
-                  <span>自动滚动</span>
-                </label>
-                <button id="downloadLogBtn" class="button button-secondary button-small" type="button" disabled>下载日志</button>
-              </div>
-            </div>
-            <pre id="consoleOutput" class="console-output">选择任务后显示输出</pre>
-          </div>
-        </section>
       </section>
-    </main>
+
+      <section class="tab-panel" data-tab-panel="settings" id="tab-settings" hidden>
+<section class="panel panel-settings">
+        <div class="panel-head">
+          <div>
+            <div class="eyebrow">System Settings</div>
+            <h2>系统默认配置</h2>
+            <p class="panel-desc">全局默认值。新建任务不展开高级设置时，直接使用这里的配置。</p>
+          </div>
+        </div>
+
+        <form id="settingsForm" class="task-form">
+          <div class="form-section-title full">调度</div>
+          <label>
+            <span>任务并发上限</span>
+            <small>同时运行的注册任务数。默认 1；最高 {{ max_concurrent_tasks_cap }}。</small>
+            <input name="max_concurrent_tasks" type="number" min="1" max="{{ max_concurrent_tasks_cap }}" step="1" value="{{ max_concurrent_tasks }}">
+          </label>
+
+          <div class="form-section-title full">代理</div>
+          <label>
+            <span>浏览器代理</span>
+            <small>浏览器访问 x.ai 时走的代理。</small>
+            <input name="browser_proxy" placeholder="例如 socks5://warp:1080">
+          </label>
+          <label>
+            <span>请求代理</span>
+            <small>邮箱 API 等普通 HTTP 请求代理，不填则直连。</small>
+            <input name="proxy" placeholder="例如 socks5://warp:1080">
+          </label>
+
+          <div class="form-section-title full">临时邮箱</div>
+          <label>
+            <span>邮箱 API Base</span>
+            <small>Temp Mail / DuckMail 接口地址。</small>
+            <input name="temp_mail_api_base" placeholder="https://api.duckmail.sbs">
+          </label>
+          <label>
+            <span>邮箱域名</span>
+            <small>注册时使用的邮箱后缀。</small>
+            <input name="temp_mail_domain" placeholder="example.com">
+          </label>
+          <label>
+            <span>邮箱管理口令 / DuckMail API Key</span>
+            <small>自定义 Temp Mail 管理口令，或 DuckMail API Key。</small>
+            <input name="temp_mail_admin_password" placeholder="admin password / dk_xxx">
+          </label>
+          <label>
+            <span>站点密码</span>
+            <small>邮箱 API 额外站点鉴权（可选）。</small>
+            <input name="temp_mail_site_password" placeholder="optional">
+          </label>
+
+          <div class="form-section-title full">入池 / grok2api</div>
+          <label>
+            <span>Admin Login 接口</span>
+            <small>管理登录地址，用于鉴权与号池统计。</small>
+            <input name="api_endpoint" placeholder="http://172.18.0.1:8000/api/admin/v1/auth/login">
+          </label>
+          <label>
+            <span>Import 接口</span>
+            <small>SSO 入池地址。</small>
+            <input name="api_import_endpoint" placeholder="http://172.18.0.1:8000/api/admin/v1/accounts/web/import">
+          </label>
+          <label>
+            <span>Admin 用户名</span>
+            <small>grok2api 管理后台用户名。</small>
+            <input name="api_admin_username" placeholder="admin">
+          </label>
+          <label>
+            <span>Admin 密码</span>
+            <small>留空保存表示沿用已有密码。</small>
+            <input name="api_admin_password" type="password" placeholder="留空则沿用已有密码" autocomplete="new-password">
+          </label>
+          <label>
+            <span>API Token（兼容旧字段）</span>
+            <small>旧 token-sink 用；新 grok2api 可留空。</small>
+            <input name="api_token" placeholder="optional legacy token">
+          </label>
+          <label class="checkbox-row">
+            <input name="api_append" type="checkbox" checked>
+            <span>追加写入 token</span>
+          </label>
+          <div class="form-actions full">
+            <button class="button" type="submit">保存默认配置</button>
+            <div id="settingsMessage" class="form-message"></div>
+          </div>
+        </form>
+      </section>
+      </section>
+        </main>
   </div>
 
   <script>
