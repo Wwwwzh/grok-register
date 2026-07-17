@@ -55,6 +55,7 @@
   const poolTrendTitleEl = document.getElementById("poolTrendTitle");
   const poolTrendDeltaEl = document.getElementById("poolTrendDelta");
   const poolTrendChartEl = document.getElementById("poolTrendChart");
+  const poolTrendRangesEl = document.getElementById("poolTrendRanges");
   const themeToggleBtnEl = document.getElementById("themeToggleBtn");
   const toastHostEl = document.getElementById("toastHost");
   const auditListEl = document.getElementById("auditList");
@@ -381,17 +382,65 @@
     }).join(" ");
   }
 
+
+  function normalizePoolTrendRange(range) {
+    const key = String(range || "6h").toLowerCase();
+    return ["1h", "6h", "24h"].includes(key) ? key : "6h";
+  }
+
+  function syncPoolTrendRangeButtons() {
+    if (!poolTrendRangesEl) return;
+    const active = normalizePoolTrendRange(state.poolTrendRange);
+    poolTrendRangesEl.querySelectorAll("[data-range]").forEach((btn) => {
+      const on = btn.getAttribute("data-range") === active;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    });
+  }
+
+  async function loadPoolTrend(range, { silent = false } = {}) {
+    const key = normalizePoolTrendRange(range || state.poolTrendRange || "6h");
+    state.poolTrendRange = key;
+    try {
+      localStorage.setItem("console_pool_trend_range", key);
+    } catch (error) {}
+    syncPoolTrendRangeButtons();
+    try {
+      const trend = await fetchJson(`/api/pool/trend?range=${encodeURIComponent(key)}&limit=288`);
+      renderPoolTrend(trend);
+      return trend;
+    } catch (error) {
+      if (!silent && poolTrendTitleEl) {
+        poolTrendTitleEl.textContent = `趋势加载失败: ${error.message}`;
+      }
+      throw error;
+    }
+  }
+
+  function setPoolTrendRange(range) {
+    const key = normalizePoolTrendRange(range);
+    if (key === normalizePoolTrendRange(state.poolTrendRange) && state.lastPoolTrend && state.lastPoolTrend.range === key) {
+      syncPoolTrendRangeButtons();
+      return Promise.resolve(state.lastPoolTrend);
+    }
+    return loadPoolTrend(key);
+  }
+
   function renderPoolTrend(trend) {
     if (!poolTrendChartEl) return;
     state.lastPoolTrend = trend || null;
     const points = (trend && trend.points) || [];
     const latest = (trend && trend.latest) || null;
     const delta = (trend && trend.delta) || {};
+    const rangeLabel = normalizePoolTrendRange((trend && trend.range) || state.poolTrendRange || "6h");
+    state.poolTrendRange = rangeLabel;
+    syncPoolTrendRangeButtons();
     if (poolTrendTitleEl) {
       if (latest) {
-        poolTrendTitleEl.textContent = `总量 ${latest.total || 0} · web ${latest.grok_web || 0} / build ${latest.grok_build || 0} / console ${latest.grok_console || 0}`;
+        const count = (trend && trend.window && trend.window.count) || points.length || 0;
+        poolTrendTitleEl.textContent = `${rangeLabel} · 总量 ${latest.total || 0} · web ${latest.grok_web || 0} / build ${latest.grok_build || 0} / console ${latest.grok_console || 0} · ${count}点`;
       } else {
-        poolTrendTitleEl.textContent = "等待采样";
+        poolTrendTitleEl.textContent = `${rangeLabel} · 等待采样`;
       }
     }
     if (poolTrendDeltaEl) {
@@ -1038,7 +1087,8 @@
       const data = await fetchJson("/api/health");
       // Prefer longer dedicated trend history when available.
       try {
-        const trend = await fetchJson("/api/pool/trend?limit=72");
+        const range = normalizePoolTrendRange(state.poolTrendRange || "6h");
+        const trend = await fetchJson(`/api/pool/trend?range=${encodeURIComponent(range)}&limit=288`);
         if (trend && (trend.points || trend.latest)) {
           data.pool_trend = trend;
         }
@@ -1409,6 +1459,14 @@
   if (refreshAuditBtnEl) {
     refreshAuditBtnEl.addEventListener("click", () => refreshAudit({ silent: false }));
   }
+  if (poolTrendRangesEl) {
+    poolTrendRangesEl.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-range]");
+      if (!btn) return;
+      setPoolTrendRange(btn.getAttribute("data-range"));
+    });
+  }
+  syncPoolTrendRangeButtons();
   applyTheme(getPreferredTheme(), { persist: false });
 
   setDefaults();

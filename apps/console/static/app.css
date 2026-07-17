@@ -1310,3 +1310,45 @@ html[data-theme="dark"] .audit-tag.level-info { background: rgba(90,140,230,0.18
 html[data-theme="dark"] .audit-tag.level-success { background: rgba(98,192,127,0.16); color: #62c07f; }
 html[data-theme="dark"] .audit-tag.level-warn { background: rgba(224,177,90,0.18); color: #e0b15a; }
 html[data-theme="dark"] .audit-tag.level-error { background: rgba(239,122,102,0.18); color: #ef9a8b; }
+
+/* ===== Pool trend ranges ===== */
+.pool-trend-ranges {
+  display: inline-flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.pool-range-btn {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.pool-range-btn:hover {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.pool-range-btn.is-active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+html[data-theme="dark"] .pool-range-btn {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+}
+
+html[data-theme="dark"] .pool-range-btn.is-active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}

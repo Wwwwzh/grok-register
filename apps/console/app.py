@@ -706,7 +706,7 @@ def run_health_checks() -> dict[str, Any]:
             "import_ok": pool.get("import_ok"),
             "import_summary": pool.get("import_summary"),
         },
-        "pool_trend": build_pool_trend(limit=24),
+        "pool_trend": build_pool_trend(limit=120, range_key="6h"),
     }
 
 
@@ -1033,15 +1033,66 @@ def record_pool_snapshot(pool: dict[str, Any], checked_at: str | None = None) ->
     return point
 
 
-def build_pool_trend(limit: int = 72) -> dict[str, Any]:
+POOL_TREND_RANGES = {
+    "1h": 1 * 60 * 60,
+    "6h": 6 * 60 * 60,
+    "24h": 24 * 60 * 60,
+}
+
+
+def normalize_pool_range(range_key: str | None = None) -> str:
+    key = str(range_key or "6h").strip().lower()
+    if key in POOL_TREND_RANGES:
+        return key
+    # accept aliases
+    aliases = {
+        "1": "1h",
+        "60m": "1h",
+        "hour": "1h",
+        "6": "6h",
+        "24": "24h",
+        "day": "24h",
+        "1d": "24h",
+    }
+    return aliases.get(key, "6h")
+
+
+def build_pool_trend(limit: int = 72, range_key: str | None = None) -> dict[str, Any]:
     history = read_pool_history()
-    points = history[-max(1, min(int(limit or 72), POOL_HISTORY_MAX_POINTS)):]
+    range_name = normalize_pool_range(range_key)
+    range_sec = POOL_TREND_RANGES[range_name]
+    now_ts = datetime.now().timestamp()
+    cutoff = now_ts - range_sec
+
+    timed_points: list[dict[str, Any]] = []
+    for item in history:
+        ts = _parse_iso_ts(str(item.get("ts") or ""))
+        if ts is None:
+            continue
+        if ts >= cutoff:
+            timed_points.append(item)
+
+    # Fallback: if timestamps are sparse/missing, keep last N by range heuristic.
+    if not timed_points and history:
+        # Rough sample count fallback when old points lack parseable timestamps.
+        heuristic = {
+            "1h": 60,
+            "6h": 120,
+            "24h": POOL_HISTORY_MAX_POINTS,
+        }.get(range_name, 72)
+        timed_points = history[-max(1, min(heuristic, POOL_HISTORY_MAX_POINTS)):]
+
+    # Soft cap after time filter so response stays light.
+    max_points = max(1, min(int(limit or POOL_HISTORY_MAX_POINTS), POOL_HISTORY_MAX_POINTS))
+    points = timed_points[-max_points:]
     if not points:
         return {
             "points": [],
             "latest": None,
             "delta": {"total": 0, "grok_web": 0, "grok_build": 0, "grok_console": 0},
-            "window": {"count": 0, "from": None, "to": None},
+            "window": {"count": 0, "from": None, "to": None, "range": range_name, "range_seconds": range_sec},
+            "range": range_name,
+            "available_ranges": list(POOL_TREND_RANGES.keys()),
         }
     first = points[0]
     last = points[-1]
@@ -1055,7 +1106,11 @@ def build_pool_trend(limit: int = 72) -> dict[str, Any]:
             "count": len(points),
             "from": first.get("ts"),
             "to": last.get("ts"),
+            "range": range_name,
+            "range_seconds": range_sec,
         },
+        "range": range_name,
+        "available_ranges": list(POOL_TREND_RANGES.keys()),
     }
 
 
@@ -1916,9 +1971,17 @@ def api_health() -> dict[str, Any]:
 
 
 @app.get("/api/pool/trend")
-def api_pool_trend(limit: int = 72) -> dict[str, Any]:
-    limit = max(1, min(int(limit or 72), POOL_HISTORY_MAX_POINTS))
-    trend = build_pool_trend(limit=limit)
+def api_pool_trend(
+    limit: int = Query(default=288, ge=1, le=288),
+    range: str = Query(default="6h"),
+) -> dict[str, Any]:
+    """Return pool history for a time window.
+
+    range: 1h | 6h | 24h
+    limit: soft max points after time filtering
+    """
+    limit = max(1, min(int(limit or POOL_HISTORY_MAX_POINTS), POOL_HISTORY_MAX_POINTS))
+    trend = build_pool_trend(limit=limit, range_key=range)
     return {"ok": True, **trend}
 
 
