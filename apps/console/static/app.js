@@ -17,6 +17,8 @@
     auditItems: [],
     seenAuditIds: {},
     sseConnected: false,
+    sseMode: "connecting", // live | polling | connecting | unsupported
+    sseLastEventAt: null,
     sseSource: null,
     sseRetryMs: 2000,
     pollTimer: null,
@@ -58,6 +60,8 @@
   const poolTrendChartEl = document.getElementById("poolTrendChart");
   const poolTrendRangesEl = document.getElementById("poolTrendRanges");
   const themeToggleBtnEl = document.getElementById("themeToggleBtn");
+  const sseStatusEl = document.getElementById("sseStatus");
+  const sseStatusTextEl = document.getElementById("sseStatusText");
   const toastHostEl = document.getElementById("toastHost");
   const auditListEl = document.getElementById("auditList");
   const auditMetaEl = document.getElementById("auditMeta");
@@ -920,6 +924,10 @@
   function handleSsePayload(payload) {
     if (!payload || typeof payload !== "object") return;
     const eventName = payload.event || "message";
+    state.sseLastEventAt = payload.ts || new Date().toLocaleTimeString();
+    if (state.sseConnected) {
+      updateSseStatus("live");
+    }
     if (eventName === "ping" || eventName === "hello") return;
     if (eventName === "audit") {
       const item = payload.data || payload;
@@ -959,6 +967,35 @@
         scheduleTaskRefresh("progress");
       }
     }
+  }
+
+
+  function updateSseStatus(mode, detail = "") {
+    const next = ["live", "polling", "connecting", "unsupported"].includes(mode)
+      ? mode
+      : (state.sseConnected ? "live" : "polling");
+    state.sseMode = next;
+    if (!sseStatusEl || !sseStatusTextEl) return;
+    sseStatusEl.classList.remove("is-live", "is-polling", "is-connecting", "is-unsupported");
+    sseStatusEl.classList.add(`is-${next}`);
+    const labels = {
+      live: "实时连接中",
+      polling: "已降级轮询",
+      connecting: "连接中...",
+      unsupported: "仅轮询模式",
+    };
+    const pollHint = next === "live" ? "任务 15s / 健康 60-120s" : "任务 3s / 健康 30-60s";
+    const text = labels[next] || next;
+    sseStatusTextEl.textContent = detail ? `${text} · ${detail}` : text;
+    const titleBits = [
+      text,
+      next === "live" ? "SSE 正常，轮询已降频" : next === "polling" ? "SSE 断开，回退高频轮询" : "",
+      pollHint,
+      state.sseLastEventAt ? `最近事件 ${state.sseLastEventAt}` : "",
+    ].filter(Boolean);
+    sseStatusEl.title = titleBits.join(" · ");
+    sseStatusEl.setAttribute("data-mode", next);
+    sseStatusEl.setAttribute("aria-label", titleBits.join("，"));
   }
 
   function stopSse() {
@@ -1051,8 +1088,11 @@
   function connectSse() {
     if (!window.EventSource) {
       state.sseConnected = false;
+      updateSseStatus("unsupported");
+      restartPolling();
       return false;
     }
+    updateSseStatus("connecting");
     stopSse();
     const qs = authTokenQuery();
     const taskQ = state.selectedTaskId ? `task_id=${encodeURIComponent(state.selectedTaskId)}` : "";
@@ -1063,6 +1103,8 @@
       es = new EventSource(url);
     } catch (error) {
       state.sseConnected = false;
+      updateSseStatus("polling", "建立失败");
+      restartPolling();
       return false;
     }
     state.sseSource = es;
@@ -1082,6 +1124,7 @@
     es.onopen = () => {
       state.sseConnected = true;
       state.sseRetryMs = 2000;
+      updateSseStatus("live");
       // When live stream is healthy, slow polling down.
       restartPolling();
     };
@@ -1089,8 +1132,10 @@
       state.sseConnected = false;
       try { es.close(); } catch (error) {}
       state.sseSource = null;
+      updateSseStatus("polling", "重连中");
       restartPolling();
       window.setTimeout(() => {
+        updateSseStatus("connecting");
         connectSse();
       }, state.sseRetryMs);
       state.sseRetryMs = Math.min(15000, Math.floor(state.sseRetryMs * 1.5));
@@ -1562,6 +1607,7 @@ stopBtnEl.addEventListener("click", async () => {
   refreshHealth();
   refreshAll();
   refreshAudit({ silent: true });
+  updateSseStatus(window.EventSource ? "connecting" : "unsupported");
   connectSse();
   restartPolling();
 })();

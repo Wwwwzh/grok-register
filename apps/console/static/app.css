@@ -1352,3 +1352,102 @@ html[data-theme="dark"] .pool-range-btn.is-active {
   background: var(--accent);
   border-color: var(--accent);
 }
+
+/* ===== SSE status indicator ===== */
+.sse-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.sse-status .sse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 0 rgba(116, 104, 92, 0.25);
+}
+
+.sse-status.is-live {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 35%, var(--line));
+  background: color-mix(in srgb, var(--success) 10%, #fff);
+}
+
+.sse-status.is-live .sse-dot {
+  background: var(--success);
+  box-shadow: 0 0 0 4px rgba(47, 125, 72, 0.12);
+}
+
+.sse-status.is-polling {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+  background: color-mix(in srgb, var(--warn) 12%, #fff);
+}
+
+.sse-status.is-polling .sse-dot {
+  background: var(--warn);
+  box-shadow: 0 0 0 4px rgba(176, 122, 22, 0.12);
+}
+
+.sse-status.is-connecting {
+  color: #2857b5;
+  border-color: color-mix(in srgb, #2857b5 35%, var(--line));
+  background: color-mix(in srgb, #2857b5 10%, #fff);
+}
+
+.sse-status.is-connecting .sse-dot {
+  background: #2857b5;
+  animation: sse-pulse 1.2s ease-in-out infinite;
+}
+
+.sse-status.is-unsupported {
+  color: var(--muted);
+}
+
+@keyframes sse-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.75); opacity: 0.55; }
+}
+
+html[data-theme="dark"] .sse-status {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  border-color: var(--line);
+}
+
+html[data-theme="dark"] .sse-status.is-live {
+  color: #62c07f;
+  background: rgba(98, 192, 127, 0.12);
+  border-color: rgba(98, 192, 127, 0.35);
+}
+
+html[data-theme="dark"] .sse-status.is-polling {
+  color: #e0b15a;
+  background: rgba(224, 177, 90, 0.12);
+  border-color: rgba(224, 177, 90, 0.35);
+}
+
+html[data-theme="dark"] .sse-status.is-connecting {
+  color: #8bb1ff;
+  background: rgba(90, 140, 230, 0.12);
+  border-color: rgba(90, 140, 230, 0.35);
+}
+
+@media (max-width: 820px) {
+  .sse-status-text {
+    max-width: 9.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
