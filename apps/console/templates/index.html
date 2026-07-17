@@ -334,6 +334,14 @@
             <span>关键词</span>
             <input id="auditQueryFilter" class="input input-compact" type="search" placeholder="消息 / 事件 / 任务" />
           </label>
+          <label class="audit-filter">
+            <span>开始日期</span>
+            <input id="auditFromFilter" class="input input-compact" type="date" />
+          </label>
+          <label class="audit-filter">
+            <span>结束日期</span>
+            <input id="auditToFilter" class="input input-compact" type="date" />
+          </label>
           <button id="auditFilterResetBtn" class="button button-ghost button-small" type="button">重置</button>
         </div>
         <div id="auditMeta" class="health-meta">等待加载</div>
@@ -390,7 +398,21 @@
                 <div class="meta-label">任务前后号池对比</div>
                 <div id="taskPoolCompareTitle" class="task-pool-compare-title">选择任务后显示</div>
               </div>
-              <button id="refreshPoolCompareBtn" class="button button-ghost button-small" type="button" disabled>刷新对比</button>
+              <div class="task-pool-compare-actions">
+                <button id="resetPoolCompareWindowBtn" class="button button-ghost button-small" type="button" disabled title="恢复任务默认起止时间">默认窗口</button>
+                <button id="refreshPoolCompareBtn" class="button button-ghost button-small" type="button" disabled>刷新对比</button>
+              </div>
+            </div>
+            <div class="task-pool-compare-window">
+              <label class="task-pool-compare-field">
+                <span>开始</span>
+                <input id="poolCompareFrom" class="input input-compact" type="datetime-local" />
+              </label>
+              <label class="task-pool-compare-field">
+                <span>结束</span>
+                <input id="poolCompareTo" class="input input-compact" type="datetime-local" />
+              </label>
+              <button id="applyPoolCompareWindowBtn" class="button button-secondary button-small" type="button" disabled>应用时间窗</button>
             </div>
             <div id="taskPoolCompareDelta" class="task-pool-compare-delta">-</div>
             <div id="taskPoolCompareMeta" class="task-pool-compare-meta"></div>

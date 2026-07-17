@@ -862,12 +862,29 @@ def write_audit_log(
     return item
 
 
+def _normalize_audit_bound(value: str | None, *, end_of_day: bool = False) -> str | None:
+    """Normalize date/datetime filter bounds for SQLite string compare on created_at."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    # Accept YYYY-MM-DD or full datetime.
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return f"{raw} 23:59:59" if end_of_day else f"{raw} 00:00:00"
+    # Normalize ISO T separator to space for lexical compare with now_iso style.
+    cleaned = raw.replace("T", " ").replace("Z", "")
+    if len(cleaned) == 16 and cleaned[10] == " ":  # YYYY-MM-DD HH:MM
+        cleaned = cleaned + (":59" if end_of_day else ":00")
+    return cleaned
+
+
 def list_audit_logs(
     limit: int = 50,
     task_id: int | None = None,
     level: str | None = None,
     event: str | None = None,
     q: str | None = None,
+    from_time: str | None = None,
+    to_time: str | None = None,
 ) -> list[dict[str, Any]]:
     limit = max(1, min(int(limit or 50), 2000))
     clauses: list[str] = []
@@ -903,6 +920,15 @@ def list_audit_logs(
         like = f"%{q_norm}%"
         clauses.append("(message LIKE ? OR event LIKE ? OR IFNULL(CAST(task_id AS TEXT), '') LIKE ?)")
         params.extend([like, like, like])
+
+    from_bound = _normalize_audit_bound(from_time, end_of_day=False)
+    to_bound = _normalize_audit_bound(to_time, end_of_day=True)
+    if from_bound:
+        clauses.append("created_at >= ?")
+        params.append(from_bound)
+    if to_bound:
+        clauses.append("created_at <= ?")
+        params.append(to_bound)
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = fetch_all(
@@ -1222,14 +1248,42 @@ def _pool_metric_view(point: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def build_task_pool_compare(task_id: int) -> dict[str, Any]:
-    """Compare pool snapshots around a task's start/finish window."""
+def build_task_pool_compare(
+    task_id: int,
+    from_time: str | None = None,
+    to_time: str | None = None,
+) -> dict[str, Any]:
+    """Compare pool snapshots around a task window or a manual time range."""
     row = task_row(task_id)
     started_at = str(row["started_at"] or "").strip()
     finished_at = str(row["finished_at"] or "").strip()
     created_at = str(row["created_at"] or "").strip()
-    start_ts = _parse_iso_ts(started_at) or _parse_iso_ts(created_at)
-    end_ts = _parse_iso_ts(finished_at) or datetime.now().timestamp()
+
+    manual_from = str(from_time or "").strip()
+    manual_to = str(to_time or "").strip()
+    # datetime-local often comes as YYYY-MM-DDTHH:MM
+    if manual_from:
+        manual_from = manual_from.replace("T", " ")
+    if manual_to:
+        manual_to = manual_to.replace("T", " ")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", manual_to):
+            manual_to = manual_to + ":59"
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", manual_to):
+            manual_to = manual_to + " 23:59:59"
+    if manual_from and re.fullmatch(r"\d{4}-\d{2}-\d{2}", manual_from):
+        manual_from = manual_from + " 00:00:00"
+    if manual_from and re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", manual_from):
+        manual_from = manual_from + ":00"
+
+    default_start = started_at or created_at or None
+    default_end = finished_at or now_iso()
+    anchor_start = manual_from or default_start
+    anchor_end = manual_to or default_end
+    start_ts = _parse_iso_ts(anchor_start) if anchor_start else None
+    end_ts = _parse_iso_ts(anchor_end) if anchor_end else datetime.now().timestamp()
+    if start_ts is not None and end_ts is not None and end_ts < start_ts:
+        start_ts, end_ts = end_ts, start_ts
+        anchor_start, anchor_end = anchor_end, anchor_start
 
     history = read_pool_history()
     before = _pool_point_at_or_before(history, start_ts)
@@ -1250,12 +1304,13 @@ def build_task_pool_compare(task_id: int) -> dict[str, Any]:
 
     # mid-window points for a tiny sparkline
     mid_points: list[dict[str, Any]] = []
-    if start_ts is not None:
+    if start_ts is not None and end_ts is not None:
+        pad = 5 * 60
         for item in history:
             ts = _parse_iso_ts(str(item.get("ts") or ""))
             if ts is None:
                 continue
-            if start_ts - 5 * 60 <= ts <= end_ts + 5 * 60:
+            if start_ts - pad <= ts <= end_ts + pad:
                 mid_points.append(_pool_metric_view(item) or {})
         # keep light
         if len(mid_points) > 60:
@@ -1272,8 +1327,11 @@ def build_task_pool_compare(task_id: int) -> dict[str, Any]:
             "finished_at": finished_at or None,
             "from_ts": before_view.get("ts") if before_view else None,
             "to_ts": after_view.get("ts") if after_view else None,
-            "anchor_start": started_at or created_at or None,
-            "anchor_end": finished_at or now_iso(),
+            "anchor_start": anchor_start,
+            "anchor_end": anchor_end,
+            "manual": bool(manual_from or manual_to),
+            "from_time": manual_from or None,
+            "to_time": manual_to or None,
         },
         "before": before_view,
         "after": after_view,
@@ -1282,6 +1340,43 @@ def build_task_pool_compare(task_id: int) -> dict[str, Any]:
         "sample_count": len(history),
         "has_compare": bool(before_view and after_view),
     }
+
+
+
+def attach_task_pool_deltas(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach lightweight before/after pool total delta onto serialized tasks."""
+    if not tasks:
+        return tasks
+    history = read_pool_history()
+    if not history:
+        for task in tasks:
+            task["pool_delta_total"] = None
+            task["pool_before_total"] = None
+            task["pool_after_total"] = None
+            task["has_pool_delta"] = False
+        return tasks
+    for task in tasks:
+        started = str(task.get("started_at") or task.get("created_at") or "").strip()
+        finished = str(task.get("finished_at") or "").strip()
+        start_ts = _parse_iso_ts(started)
+        end_ts = _parse_iso_ts(finished) if finished else datetime.now().timestamp()
+        before = _pool_point_at_or_before(history, start_ts)
+        after = _pool_point_at_or_after(history, end_ts)
+        if after is None and history:
+            after = history[-1]
+        before_total = int((before or {}).get("total") or 0) if before else None
+        after_total = int((after or {}).get("total") or 0) if after else None
+        if before_total is None or after_total is None:
+            task["pool_delta_total"] = None
+            task["pool_before_total"] = before_total
+            task["pool_after_total"] = after_total
+            task["has_pool_delta"] = False
+        else:
+            task["pool_before_total"] = before_total
+            task["pool_after_total"] = after_total
+            task["pool_delta_total"] = after_total - before_total
+            task["has_pool_delta"] = True
+    return tasks
 
 
 def classify_error_text(text: str) -> str:
@@ -2492,9 +2587,17 @@ def api_pool_trend(
 
 
 @app.get("/api/tasks/{task_id}/pool-compare")
-def api_task_pool_compare(task_id: int) -> dict[str, Any]:
-    """Pool totals before/after a task window for trend comparison."""
-    return build_task_pool_compare(task_id)
+def api_task_pool_compare(
+    task_id: int,
+    from_time: str | None = Query(default=None, alias="from"),
+    to_time: str | None = Query(default=None, alias="to"),
+) -> dict[str, Any]:
+    """Pool totals before/after a task window for trend comparison.
+
+    Optional query params:
+    - from / to: manual datetime window (YYYY-MM-DD or YYYY-MM-DDTHH:MM)
+    """
+    return build_task_pool_compare(task_id, from_time=from_time, to_time=to_time)
 
 @app.get("/api/events")
 async def api_events(request: Request, task_id: int | None = Query(default=None)):
@@ -2564,8 +2667,18 @@ def api_audit_logs(
     level: str | None = Query(default=None),
     event: str | None = Query(default=None),
     q: str | None = Query(default=None),
+    from_time: str | None = Query(default=None, alias="from"),
+    to_time: str | None = Query(default=None, alias="to"),
 ) -> dict[str, Any]:
-    items = list_audit_logs(limit=limit, task_id=task_id, level=level, event=event, q=q)
+    items = list_audit_logs(
+        limit=limit,
+        task_id=task_id,
+        level=level,
+        event=event,
+        q=q,
+        from_time=from_time,
+        to_time=to_time,
+    )
     return {
         "ok": True,
         "items": items,
@@ -2574,6 +2687,8 @@ def api_audit_logs(
             "level": (level or "").strip().lower() or None,
             "event": (event or "").strip() or None,
             "q": (q or "").strip() or None,
+            "from": (from_time or "").strip() or None,
+            "to": (to_time or "").strip() or None,
             "limit": max(1, min(int(limit or 50), 200)),
         },
         "event_names": list_audit_event_names(limit=40),
@@ -2587,9 +2702,19 @@ def api_audit_export(
     level: str | None = Query(default=None),
     event: str | None = Query(default=None),
     q: str | None = Query(default=None),
+    from_time: str | None = Query(default=None, alias="from"),
+    to_time: str | None = Query(default=None, alias="to"),
 ) -> Response:
     """Export filtered audit logs as CSV (UTF-8 BOM for Excel)."""
-    items = list_audit_logs(limit=limit, task_id=task_id, level=level, event=event, q=q)
+    items = list_audit_logs(
+        limit=limit,
+        task_id=task_id,
+        level=level,
+        event=event,
+        q=q,
+        from_time=from_time,
+        to_time=to_time,
+    )
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["id", "created_at", "level", "event", "task_id", "message", "detail_json"])
@@ -2710,7 +2835,7 @@ def delete_template(template_id: str) -> dict[str, Any]:
 @app.get("/api/tasks")
 def list_tasks() -> dict[str, Any]:
     rows = fetch_all("SELECT * FROM tasks ORDER BY id DESC")
-    return {"tasks": [serialize_task(row) for row in rows]}
+    return {"tasks": attach_task_pool_deltas([serialize_task(row) for row in rows])}
 
 
 @app.post("/api/tasks")

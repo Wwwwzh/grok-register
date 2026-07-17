@@ -21,6 +21,13 @@
       event: "",
       task_id: "",
       q: "",
+      from: "",
+      to: "",
+    },
+    poolCompareWindow: {
+      from: "",
+      to: "",
+      manual: false,
     },
     seenAuditIds: {},
     sseConnected: false,
@@ -85,7 +92,13 @@
   const auditEventFilterEl = document.getElementById("auditEventFilter");
   const auditTaskFilterEl = document.getElementById("auditTaskFilter");
   const auditQueryFilterEl = document.getElementById("auditQueryFilter");
+  const auditFromFilterEl = document.getElementById("auditFromFilter");
+  const auditToFilterEl = document.getElementById("auditToFilter");
   const auditFilterResetBtnEl = document.getElementById("auditFilterResetBtn");
+  const poolCompareFromEl = document.getElementById("poolCompareFrom");
+  const poolCompareToEl = document.getElementById("poolCompareTo");
+  const applyPoolCompareWindowBtnEl = document.getElementById("applyPoolCompareWindowBtn");
+  const resetPoolCompareWindowBtnEl = document.getElementById("resetPoolCompareWindowBtn");
   const overviewRunningEl = document.getElementById("overviewRunning");
   const overviewRunningHintEl = document.getElementById("overviewRunningHint");
   const overviewPoolTotalEl = document.getElementById("overviewPoolTotal");
@@ -629,6 +642,17 @@
       const gapLine = gap > 0
         ? `<div class="task-gap-line">成功未入池 ${gap}</div>`
         : "";
+      const poolDelta = task.has_pool_delta ? Number(task.pool_delta_total || 0) : null;
+      const poolDeltaClass = poolDelta == null
+        ? ""
+        : poolDelta > 0
+          ? "up"
+          : poolDelta < 0
+            ? "down"
+            : "flat";
+      const poolDeltaLine = poolDelta == null
+        ? ""
+        : `<div class="task-card-pool-delta ${poolDeltaClass}" title="号池总量前后变化：${task.pool_before_total} → ${task.pool_after_total}">号池 ${poolDelta > 0 ? "+" : ""}${poolDelta}</div>`;
       const errLine = err
         ? `<div class="task-error-line" title="${escapeHtml(task.last_error || err)}">${escapeHtml(err)}</div>`
         : "";
@@ -648,7 +672,7 @@
           <span class="progress-failed" style="width:${p.failedPct}%"></span>
         </div>
         <div class="task-subrow task-progress-meta">进度 ${p.successPct}% · 入池 ${p.pushedPct}%</div>
-        ${gapLine}
+        ${gapLine}${poolDeltaLine}
         ${typeLine}
         ${errLine}
         <div class="task-actions">
@@ -1089,24 +1113,77 @@
       ].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
     }
+    // Date range: compare YYYY-MM-DD (or full datetime) lexicographically against created_at
+    const created = String(item.created_at || "").replace("T", " ").trim();
+    const from = String(f.from || "").trim();
+    const to = String(f.to || "").trim();
+    if (from) {
+      const fromBound = from.length === 10 ? `${from} 00:00:00` : from.replace("T", " ");
+      if (created && created < fromBound) return false;
+    }
+    if (to) {
+      const toBound = to.length === 10 ? `${to} 23:59:59` : to.replace("T", " ");
+      if (created && created > toBound) return false;
+    }
     return true;
   }
 
   function readAuditFiltersFromUi() {
-    const filters = state.auditFilters || { level: "", event: "", task_id: "", q: "" };
+    const filters = state.auditFilters || { level: "", event: "", task_id: "", q: "", from: "", to: "" };
     filters.level = auditLevelFilterEl ? String(auditLevelFilterEl.value || "").trim().toLowerCase() : (filters.level || "");
     filters.event = auditEventFilterEl ? String(auditEventFilterEl.value || "").trim() : (filters.event || "");
     filters.task_id = auditTaskFilterEl ? String(auditTaskFilterEl.value || "").trim() : (filters.task_id || "");
     filters.q = auditQueryFilterEl ? String(auditQueryFilterEl.value || "").trim() : (filters.q || "");
+    filters.from = auditFromFilterEl ? String(auditFromFilterEl.value || "").trim() : (filters.from || "");
+    filters.to = auditToFilterEl ? String(auditToFilterEl.value || "").trim() : (filters.to || "");
     state.auditFilters = filters;
     return filters;
   }
 
   function auditFiltersActive(filters = state.auditFilters) {
     const f = filters || {};
-    return Boolean((f.level || "").trim() || (f.event || "").trim() || (f.task_id || "").trim() || (f.q || "").trim());
+    return Boolean(
+      (f.level || "").trim()
+      || (f.event || "").trim()
+      || (f.task_id || "").trim()
+      || (f.q || "").trim()
+      || (f.from || "").trim()
+      || (f.to || "").trim()
+    );
   }
 
+
+
+  function toDatetimeLocalValue(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    // Accept "YYYY-MM-DD HH:MM:SS" / ISO / date only
+    const cleaned = raw.replace("T", " ").replace("Z", "").split(".")[0];
+    const m = cleaned.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2})(?::\d{2})?)?/);
+    if (!m) return "";
+    const date = m[1];
+    const hh = m[2] || "00";
+    const mm = m[3] || "00";
+    return `${date}T${hh}:${mm}`;
+  }
+
+  function readPoolCompareWindowFromUi() {
+    const from = poolCompareFromEl ? String(poolCompareFromEl.value || "").trim() : "";
+    const to = poolCompareToEl ? String(poolCompareToEl.value || "").trim() : "";
+    return { from, to, manual: Boolean(from || to) };
+  }
+
+  function setPoolCompareWindowInputs(fromValue, toValue, { manual = false } = {}) {
+    const fromLocal = toDatetimeLocalValue(fromValue);
+    const toLocal = toDatetimeLocalValue(toValue);
+    if (poolCompareFromEl) poolCompareFromEl.value = fromLocal;
+    if (poolCompareToEl) poolCompareToEl.value = toLocal;
+    state.poolCompareWindow = {
+      from: fromLocal,
+      to: toLocal,
+      manual: Boolean(manual && (fromLocal || toLocal)),
+    };
+  }
 
   function buildAuditExportUrl(extra = {}) {
     const filters = { ...readAuditFiltersFromUi(), ...extra };
@@ -1116,6 +1193,8 @@
     if (filters.event) params.set("event", filters.event);
     if (filters.task_id) params.set("task_id", filters.task_id);
     if (filters.q) params.set("q", filters.q);
+    if (filters.from) params.set("from", filters.from);
+    if (filters.to) params.set("to", filters.to);
     // keep auth token in query if present (same as other downloads)
     const authQ = authTokenQuery();
     if (authQ) {
@@ -1148,11 +1227,15 @@
       event: "",
       task_id: String(id),
       q: "",
+      from: "",
+      to: "",
     };
     if (auditLevelFilterEl) auditLevelFilterEl.value = "";
     if (auditEventFilterEl) auditEventFilterEl.value = "";
     if (auditTaskFilterEl) auditTaskFilterEl.value = String(id);
     if (auditQueryFilterEl) auditQueryFilterEl.value = "";
+    if (auditFromFilterEl) auditFromFilterEl.value = "";
+    if (auditToFilterEl) auditToFilterEl.value = "";
     // scroll audit panel into view
     const panel = document.querySelector(".panel-audit");
     if (panel && typeof panel.scrollIntoView === "function") {
@@ -1194,9 +1277,10 @@
     }
     if (taskPoolCompareMetaEl) {
       const bits = [];
-      if (windowInfo.anchor_start) bits.push(`任务开始 ${windowInfo.anchor_start}`);
-      if (windowInfo.finished_at) bits.push(`结束 ${windowInfo.finished_at}`);
-      else if (windowInfo.anchor_end) bits.push(`截至 ${windowInfo.anchor_end}`);
+      if (windowInfo.manual) bits.push("手动时间窗");
+      if (windowInfo.anchor_start) bits.push(`窗口开始 ${windowInfo.anchor_start}`);
+      if (windowInfo.finished_at && !windowInfo.manual) bits.push(`任务结束 ${windowInfo.finished_at}`);
+      else if (windowInfo.anchor_end) bits.push(`窗口结束 ${windowInfo.anchor_end}`);
       if (before && before.ts) bits.push(`前采样 ${before.ts}`);
       if (after && after.ts) bits.push(`后采样 ${after.ts}`);
       taskPoolCompareMetaEl.textContent = bits.join(" · ") || "等待对比数据";
@@ -1223,14 +1307,32 @@
     }
   }
 
-  async function loadTaskPoolCompare(taskId, { silent = false } = {}) {
+  async function loadTaskPoolCompare(taskId, { silent = false, useUiWindow = true, resetWindow = false } = {}) {
     const id = Number(taskId);
     if (!id) return null;
     if (refreshPoolCompareBtnEl) refreshPoolCompareBtnEl.disabled = false;
+    if (applyPoolCompareWindowBtnEl) applyPoolCompareWindowBtnEl.disabled = false;
+    if (resetPoolCompareWindowBtnEl) resetPoolCompareWindowBtnEl.disabled = false;
     if (taskPoolCompareBoxEl) taskPoolCompareBoxEl.classList.remove("hidden");
     if (taskPoolCompareTitleEl && !silent) taskPoolCompareTitleEl.textContent = "加载对比中...";
     try {
-      const data = await fetchJson(`/api/tasks/${id}/pool-compare`);
+      const params = new URLSearchParams();
+      if (resetWindow) {
+        state.poolCompareWindow = { from: "", to: "", manual: false };
+      }
+      const win = useUiWindow ? readPoolCompareWindowFromUi() : (state.poolCompareWindow || {});
+      if (!resetWindow && win && win.manual) {
+        if (win.from) params.set("from", win.from);
+        if (win.to) params.set("to", win.to);
+        state.poolCompareWindow = { from: win.from || "", to: win.to || "", manual: true };
+      }
+      const qs = params.toString();
+      const data = await fetchJson(`/api/tasks/${id}/pool-compare${qs ? `?${qs}` : ""}`);
+      // If using default task window, seed datetime inputs from response anchors
+      if (resetWindow || !(state.poolCompareWindow && state.poolCompareWindow.manual)) {
+        const windowInfo = (data && data.window) || {};
+        setPoolCompareWindowInputs(windowInfo.anchor_start, windowInfo.anchor_end, { manual: false });
+      }
       renderTaskPoolCompare(data);
       return data;
     } catch (error) {
@@ -1249,6 +1351,11 @@
   function clearTaskPoolCompare() {
     if (taskPoolCompareBoxEl) taskPoolCompareBoxEl.classList.add("hidden");
     if (refreshPoolCompareBtnEl) refreshPoolCompareBtnEl.disabled = true;
+    if (applyPoolCompareWindowBtnEl) applyPoolCompareWindowBtnEl.disabled = true;
+    if (resetPoolCompareWindowBtnEl) resetPoolCompareWindowBtnEl.disabled = true;
+    if (poolCompareFromEl) poolCompareFromEl.value = "";
+    if (poolCompareToEl) poolCompareToEl.value = "";
+    state.poolCompareWindow = { from: "", to: "", manual: false };
     if (taskPoolCompareTitleEl) taskPoolCompareTitleEl.textContent = "选择任务后显示";
     if (taskPoolCompareDeltaEl) taskPoolCompareDeltaEl.textContent = "-";
     if (taskPoolCompareMetaEl) taskPoolCompareMetaEl.textContent = "";
@@ -1263,6 +1370,8 @@
     if (filters.event) params.set("event", filters.event);
     if (filters.task_id) params.set("task_id", filters.task_id);
     if (filters.q) params.set("q", filters.q);
+    if (filters.from) params.set("from", filters.from);
+    if (filters.to) params.set("to", filters.to);
     return `/api/audit?${params.toString()}`;
   }
 
@@ -1383,11 +1492,13 @@
   }
 
   function resetAuditFilters() {
-    state.auditFilters = { level: "", event: "", task_id: "", q: "" };
+    state.auditFilters = { level: "", event: "", task_id: "", q: "", from: "", to: "" };
     if (auditLevelFilterEl) auditLevelFilterEl.value = "";
     if (auditEventFilterEl) auditEventFilterEl.value = "";
     if (auditTaskFilterEl) auditTaskFilterEl.value = "";
     if (auditQueryFilterEl) auditQueryFilterEl.value = "";
+    if (auditFromFilterEl) auditFromFilterEl.value = "";
+    if (auditToFilterEl) auditToFilterEl.value = "";
     refreshAudit({ silent: true });
   }
 
@@ -1914,8 +2025,32 @@ stopBtnEl.addEventListener("click", async () => {
   if (refreshPoolCompareBtnEl) {
     refreshPoolCompareBtnEl.addEventListener("click", () => {
       if (!state.selectedTaskId) return;
-      loadTaskPoolCompare(state.selectedTaskId, { silent: false });
+      loadTaskPoolCompare(state.selectedTaskId, { silent: false, useUiWindow: true });
     });
+  }
+  if (applyPoolCompareWindowBtnEl) {
+    applyPoolCompareWindowBtnEl.addEventListener("click", () => {
+      if (!state.selectedTaskId) return;
+      const win = readPoolCompareWindowFromUi();
+      if (!win.from && !win.to) {
+        showToast("请选择时间窗", "请至少设置开始或结束时间", "warn");
+        return;
+      }
+      state.poolCompareWindow = { from: win.from, to: win.to, manual: true };
+      loadTaskPoolCompare(state.selectedTaskId, { silent: false, useUiWindow: true });
+    });
+  }
+  if (resetPoolCompareWindowBtnEl) {
+    resetPoolCompareWindowBtnEl.addEventListener("click", () => {
+      if (!state.selectedTaskId) return;
+      loadTaskPoolCompare(state.selectedTaskId, { silent: false, resetWindow: true, useUiWindow: false });
+    });
+  }
+  if (auditFromFilterEl) {
+    auditFromFilterEl.addEventListener("change", () => scheduleAuditRefresh());
+  }
+  if (auditToFilterEl) {
+    auditToFilterEl.addEventListener("change", () => scheduleAuditRefresh());
   }
   if (auditLevelFilterEl) {
     auditLevelFilterEl.addEventListener("change", () => {
