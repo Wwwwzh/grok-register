@@ -652,7 +652,7 @@
             : "flat";
       const poolDeltaLine = poolDelta == null
         ? ""
-        : `<div class="task-card-pool-delta ${poolDeltaClass}" title="号池总量前后变化：${task.pool_before_total} → ${task.pool_after_total}">号池 ${poolDelta > 0 ? "+" : ""}${poolDelta}</div>`;
+        : `<div class="task-card-pool-delta ${poolDeltaClass}" title="号池总量前后变化：${task.pool_before_total} → ${task.pool_after_total}"><span class="task-card-pool-delta-label">号池</span><span class="task-card-pool-delta-value">${poolDelta > 0 ? "+" : ""}${poolDelta}</span><span class="task-card-pool-delta-range">${task.pool_before_total}→${task.pool_after_total}</span></div>`;
       const errLine = err
         ? `<div class="task-error-line" title="${escapeHtml(task.last_error || err)}">${escapeHtml(err)}</div>`
         : "";
@@ -672,7 +672,7 @@
           <span class="progress-failed" style="width:${p.failedPct}%"></span>
         </div>
         <div class="task-subrow task-progress-meta">进度 ${p.successPct}% · 入池 ${p.pushedPct}%</div>
-        ${gapLine}${poolDeltaLine}
+        ${(gapLine || poolDeltaLine) ? `<div class="task-card-metrics">${gapLine}${poolDeltaLine}</div>` : ""}
         ${typeLine}
         ${errLine}
         <div class="task-actions">
@@ -1266,10 +1266,10 @@
     if (taskPoolCompareDeltaEl) {
       if (has) {
         taskPoolCompareDeltaEl.innerHTML = [
-          `<span class="${deltaClass(delta.total)}">总量 ${formatSigned(delta.total)}</span>`,
-          `<span class="${deltaClass(delta.grok_web)}">web ${formatSigned(delta.grok_web)}</span>`,
-          `<span class="${deltaClass(delta.grok_build)}">build ${formatSigned(delta.grok_build)}</span>`,
-          `<span class="${deltaClass(delta.grok_console)}">console ${formatSigned(delta.grok_console)}</span>`,
+          `<span class="pool-delta-chip ${deltaClass(delta.total)}"><em>总量</em><strong>${formatSigned(delta.total)}</strong></span>`,
+          `<span class="pool-delta-chip ${deltaClass(delta.grok_web)}"><em>web</em><strong>${formatSigned(delta.grok_web)}</strong></span>`,
+          `<span class="pool-delta-chip ${deltaClass(delta.grok_build)}"><em>build</em><strong>${formatSigned(delta.grok_build)}</strong></span>`,
+          `<span class="pool-delta-chip ${deltaClass(delta.grok_console)}"><em>console</em><strong>${formatSigned(delta.grok_console)}</strong></span>`,
         ].join("");
       } else {
         taskPoolCompareDeltaEl.textContent = "—";
@@ -1277,13 +1277,15 @@
     }
     if (taskPoolCompareMetaEl) {
       const bits = [];
-      if (windowInfo.manual) bits.push("手动时间窗");
-      if (windowInfo.anchor_start) bits.push(`窗口开始 ${windowInfo.anchor_start}`);
-      if (windowInfo.finished_at && !windowInfo.manual) bits.push(`任务结束 ${windowInfo.finished_at}`);
-      else if (windowInfo.anchor_end) bits.push(`窗口结束 ${windowInfo.anchor_end}`);
-      if (before && before.ts) bits.push(`前采样 ${before.ts}`);
-      if (after && after.ts) bits.push(`后采样 ${after.ts}`);
-      taskPoolCompareMetaEl.textContent = bits.join(" · ") || "等待对比数据";
+      if (windowInfo.anchor_start) bits.push(["任务开始", windowInfo.anchor_start]);
+      if (windowInfo.finished_at) bits.push(["结束", windowInfo.finished_at]);
+      else if (windowInfo.anchor_end) bits.push(["截至", windowInfo.anchor_end]);
+      if (before && before.ts) bits.push(["前采样", before.ts]);
+      if (after && after.ts) bits.push(["后采样", after.ts]);
+      if (windowInfo.manual) bits.push(["窗口", "手动"]);
+      taskPoolCompareMetaEl.innerHTML = bits.length
+        ? bits.map(([k, v]) => `<span class="pool-meta-chip"><em>${k}</em><span>${escapeHtml(String(v))}</span></span>`).join("")
+        : `<span class="pool-meta-chip"><em>状态</em><span>等待对比数据</span></span>`;
     }
     if (taskPoolCompareChartEl) {
       const points = (data && data.points) || [];
