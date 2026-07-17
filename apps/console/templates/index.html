@@ -306,6 +306,33 @@
           </div>
           <button id="refreshAuditBtn" class="button button-secondary button-small" type="button">刷新</button>
         </div>
+        <div class="audit-filters" id="auditFilters">
+          <label class="audit-filter">
+            <span>级别</span>
+            <select id="auditLevelFilter" class="input input-compact">
+              <option value="">全部级别</option>
+              <option value="info">info</option>
+              <option value="success">success</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+            </select>
+          </label>
+          <label class="audit-filter">
+            <span>事件</span>
+            <select id="auditEventFilter" class="input input-compact">
+              <option value="">全部事件</option>
+            </select>
+          </label>
+          <label class="audit-filter">
+            <span>任务</span>
+            <input id="auditTaskFilter" class="input input-compact" type="number" min="1" step="1" placeholder="任务 ID" />
+          </label>
+          <label class="audit-filter audit-filter-grow">
+            <span>关键词</span>
+            <input id="auditQueryFilter" class="input input-compact" type="search" placeholder="消息 / 事件 / 任务" />
+          </label>
+          <button id="auditFilterResetBtn" class="button button-ghost button-small" type="button">重置</button>
+        </div>
         <div id="auditMeta" class="health-meta">等待加载</div>
         <div id="auditList" class="audit-list"></div>
       </section>

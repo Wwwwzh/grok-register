@@ -860,27 +860,58 @@ def write_audit_log(
     return item
 
 
-def list_audit_logs(limit: int = 50, task_id: int | None = None) -> list[dict[str, Any]]:
+def list_audit_logs(
+    limit: int = 50,
+    task_id: int | None = None,
+    level: str | None = None,
+    event: str | None = None,
+    q: str | None = None,
+) -> list[dict[str, Any]]:
     limit = max(1, min(int(limit or 50), 200))
+    clauses: list[str] = []
+    params: list[Any] = []
+
     if task_id is not None:
-        rows = fetch_all(
-            """
-            SELECT * FROM audit_logs
-            WHERE task_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (int(task_id), limit),
-        )
-    else:
-        rows = fetch_all(
-            """
-            SELECT * FROM audit_logs
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
+        clauses.append("task_id = ?")
+        params.append(int(task_id))
+
+    level_norm = str(level or "").strip().lower()
+    if level_norm:
+        if level_norm not in {"info", "success", "warn", "error"}:
+            level_norm = ""
+        else:
+            clauses.append("level = ?")
+            params.append(level_norm)
+
+    event_norm = str(event or "").strip()
+    if event_norm:
+        # exact match when no wildcard; support prefix* and contains via %...%
+        if event_norm.endswith("*") and "%" not in event_norm:
+            clauses.append("event LIKE ?")
+            params.append(event_norm[:-1] + "%")
+        elif "%" in event_norm or "_" in event_norm:
+            clauses.append("event LIKE ?")
+            params.append(event_norm)
+        else:
+            clauses.append("event = ?")
+            params.append(event_norm)
+
+    q_norm = str(q or "").strip()
+    if q_norm:
+        like = f"%{q_norm}%"
+        clauses.append("(message LIKE ? OR event LIKE ? OR IFNULL(CAST(task_id AS TEXT), '') LIKE ?)")
+        params.extend([like, like, like])
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = fetch_all(
+        f"""
+        SELECT * FROM audit_logs
+        {where_sql}
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (*params, limit),
+    )
     out: list[dict[str, Any]] = []
     for row in rows:
         detail = {}
@@ -899,6 +930,28 @@ def list_audit_logs(limit: int = 50, task_id: int | None = None) -> list[dict[st
                 "detail": detail if isinstance(detail, dict) else {},
             }
         )
+    return out
+
+
+def list_audit_event_names(limit: int = 40) -> list[str]:
+    """Distinct recent event names for filter dropdowns."""
+    limit = max(1, min(int(limit or 40), 100))
+    rows = fetch_all(
+        """
+        SELECT event, MAX(id) AS mid
+        FROM audit_logs
+        WHERE event IS NOT NULL AND TRIM(event) != ''
+        GROUP BY event
+        ORDER BY mid DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    out: list[str] = []
+    for row in rows:
+        name = str(row["event"] or "").strip()
+        if name and name not in out:
+            out.append(name)
     return out
 
 
@@ -2382,8 +2435,26 @@ async def api_events(request: Request, task_id: int | None = Query(default=None)
 
 
 @app.get("/api/audit")
-def api_audit_logs(limit: int = Query(50, ge=1, le=200), task_id: int | None = Query(default=None)) -> dict[str, Any]:
-    return {"ok": True, "items": list_audit_logs(limit=limit, task_id=task_id)}
+def api_audit_logs(
+    limit: int = Query(50, ge=1, le=200),
+    task_id: int | None = Query(default=None),
+    level: str | None = Query(default=None),
+    event: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+) -> dict[str, Any]:
+    items = list_audit_logs(limit=limit, task_id=task_id, level=level, event=event, q=q)
+    return {
+        "ok": True,
+        "items": items,
+        "filters": {
+            "task_id": task_id,
+            "level": (level or "").strip().lower() or None,
+            "event": (event or "").strip() or None,
+            "q": (q or "").strip() or None,
+            "limit": max(1, min(int(limit or 50), 200)),
+        },
+        "event_names": list_audit_event_names(limit=40),
+    }
 
 
 @app.get("/api/settings")

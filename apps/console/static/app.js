@@ -15,6 +15,13 @@
     lastHealth: null,
     lastPoolTrend: null,
     auditItems: [],
+    auditEventNames: [],
+    auditFilters: {
+      level: "",
+      event: "",
+      task_id: "",
+      q: "",
+    },
     seenAuditIds: {},
     sseConnected: false,
     sseMode: "connecting", // live | polling | connecting | unsupported
@@ -66,6 +73,11 @@
   const auditListEl = document.getElementById("auditList");
   const auditMetaEl = document.getElementById("auditMeta");
   const refreshAuditBtnEl = document.getElementById("refreshAuditBtn");
+  const auditLevelFilterEl = document.getElementById("auditLevelFilter");
+  const auditEventFilterEl = document.getElementById("auditEventFilter");
+  const auditTaskFilterEl = document.getElementById("auditTaskFilter");
+  const auditQueryFilterEl = document.getElementById("auditQueryFilter");
+  const auditFilterResetBtnEl = document.getElementById("auditFilterResetBtn");
   const overviewRunningEl = document.getElementById("overviewRunning");
   const overviewRunningHintEl = document.getElementById("overviewRunningHint");
   const overviewPoolTotalEl = document.getElementById("overviewPoolTotal");
@@ -941,12 +953,28 @@
               ? "任务已创建"
               : item.event === "tasks_cleanup"
                 ? "已清理任务"
-                : "任务通知";
-          if (["task_finished", "task_created", "task_deleted", "tasks_cleanup", "task_stopping", "task_stopped"].includes(item.event)) {
+                : item.event === "push_retry_ok"
+                  ? "入池重试成功"
+                  : item.event === "push_retry_failed"
+                    ? "入池重试失败"
+                    : "任务通知";
+          if (["task_finished", "task_created", "task_deleted", "tasks_cleanup", "task_stopping", "task_stopped", "push_retry_ok", "push_retry_failed"].includes(item.event)) {
             showToast(title, item.message || "", item.level || "info");
           }
-          const next = [item, ...(state.auditItems || [])].slice(0, 40);
-          renderAuditList(next);
+          if (item.event) {
+            syncAuditEventOptions([item.event]);
+          }
+          // Only prepend into the visible list when it matches current filters.
+          if (matchesAuditFilters(item)) {
+            const next = [item, ...(state.auditItems || [])].slice(0, 40);
+            const f = state.auditFilters || {};
+            const parts = [];
+            if (f.level) parts.push(`级别 ${f.level}`);
+            if (f.event) parts.push(`事件 ${f.event}`);
+            if (f.task_id) parts.push(`任务 #${f.task_id}`);
+            if (f.q) parts.push(`关键词 “${f.q}”`);
+            renderAuditList(next, { metaSuffix: parts.join(" · ") });
+          }
         }
       } else {
         refreshAudit({ silent: true });
@@ -1023,15 +1051,94 @@
     }, Math.max(2000, ttlMs));
   }
 
-  function renderAuditList(items) {
+  function matchesAuditFilters(item, filters = state.auditFilters) {
+    const f = filters || {};
+    if (!item || typeof item !== "object") return false;
+    const level = String(f.level || "").trim().toLowerCase();
+    if (level && String(item.level || "").toLowerCase() !== level) return false;
+    const event = String(f.event || "").trim();
+    if (event && String(item.event || "") !== event) return false;
+    const taskId = String(f.task_id || "").trim();
+    if (taskId) {
+      if (item.task_id == null || String(item.task_id) !== taskId) return false;
+    }
+    const q = String(f.q || "").trim().toLowerCase();
+    if (q) {
+      const hay = [
+        item.message || "",
+        item.event || "",
+        item.task_id != null ? String(item.task_id) : "",
+        item.level || "",
+      ].join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  }
+
+  function readAuditFiltersFromUi() {
+    const filters = state.auditFilters || { level: "", event: "", task_id: "", q: "" };
+    filters.level = auditLevelFilterEl ? String(auditLevelFilterEl.value || "").trim().toLowerCase() : (filters.level || "");
+    filters.event = auditEventFilterEl ? String(auditEventFilterEl.value || "").trim() : (filters.event || "");
+    filters.task_id = auditTaskFilterEl ? String(auditTaskFilterEl.value || "").trim() : (filters.task_id || "");
+    filters.q = auditQueryFilterEl ? String(auditQueryFilterEl.value || "").trim() : (filters.q || "");
+    state.auditFilters = filters;
+    return filters;
+  }
+
+  function auditFiltersActive(filters = state.auditFilters) {
+    const f = filters || {};
+    return Boolean((f.level || "").trim() || (f.event || "").trim() || (f.task_id || "").trim() || (f.q || "").trim());
+  }
+
+  function buildAuditQuery(extra = {}) {
+    const filters = { ...readAuditFiltersFromUi(), ...extra };
+    const params = new URLSearchParams();
+    params.set("limit", "40");
+    if (filters.level) params.set("level", filters.level);
+    if (filters.event) params.set("event", filters.event);
+    if (filters.task_id) params.set("task_id", filters.task_id);
+    if (filters.q) params.set("q", filters.q);
+    return `/api/audit?${params.toString()}`;
+  }
+
+  function syncAuditEventOptions(eventNames = []) {
+    if (!auditEventFilterEl) return;
+    const names = Array.from(new Set([...(eventNames || []), ...(state.auditEventNames || [])].filter(Boolean)));
+    names.sort((a, b) => String(a).localeCompare(String(b)));
+    state.auditEventNames = names;
+    const current = String(state.auditFilters?.event || auditEventFilterEl.value || "");
+    const options = ['<option value="">全部事件</option>']
+      .concat(names.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`));
+    auditEventFilterEl.innerHTML = options.join("");
+    if (current && names.includes(current)) {
+      auditEventFilterEl.value = current;
+    } else if (current) {
+      // keep a temporary option for active filter even if not in recent set
+      const opt = document.createElement("option");
+      opt.value = current;
+      opt.textContent = current;
+      auditEventFilterEl.appendChild(opt);
+      auditEventFilterEl.value = current;
+    } else {
+      auditEventFilterEl.value = "";
+    }
+  }
+
+  function renderAuditList(items, { metaSuffix = "" } = {}) {
     if (!auditListEl) return;
     const list = items || [];
     state.auditItems = list;
     if (auditMetaEl) {
-      auditMetaEl.textContent = list.length ? `最近 ${list.length} 条审计记录` : "暂无审计记录";
+      const active = auditFiltersActive();
+      const base = list.length
+        ? (active ? `筛选到 ${list.length} 条` : `最近 ${list.length} 条审计记录`)
+        : (active ? "当前筛选无结果" : "暂无审计记录");
+      auditMetaEl.textContent = metaSuffix ? `${base} · ${metaSuffix}` : base;
     }
     if (!list.length) {
-      auditListEl.innerHTML = '<div class="empty">创建/启停/结束/清理任务后会出现在这里</div>';
+      auditListEl.innerHTML = auditFiltersActive()
+        ? '<div class="empty">没有匹配当前筛选的审计记录</div>'
+        : '<div class="empty">创建/启停/结束/清理任务后会出现在这里</div>';
       return;
     }
     auditListEl.innerHTML = list.map((item) => {
@@ -1053,10 +1160,16 @@
 
   async function refreshAudit({ silent = false } = {}) {
     try {
-      const data = await fetchJson("/api/audit?limit=40");
+      const data = await fetchJson(buildAuditQuery());
       const items = data.items || [];
-      // toast only for newly seen high-signal events
-      const important = new Set(["task_finished", "task_created", "task_deleted", "tasks_cleanup", "task_stopping", "task_stopped"]);
+      if (Array.isArray(data.event_names)) {
+        syncAuditEventOptions(data.event_names);
+      }
+      // toast only for newly seen high-signal events (unfiltered feed still useful when filters empty)
+      const important = new Set([
+        "task_finished", "task_created", "task_deleted", "tasks_cleanup",
+        "task_stopping", "task_stopped", "push_retry_ok", "push_retry_failed",
+      ]);
       for (const item of items.slice().reverse()) {
         const id = String(item.id || "");
         if (!id || state.seenAuditIds[id]) continue;
@@ -1068,7 +1181,11 @@
               ? "任务已创建"
               : item.event === "tasks_cleanup"
                 ? "已清理任务"
-                : "任务通知";
+                : item.event === "push_retry_ok"
+                  ? "入池重试成功"
+                  : item.event === "push_retry_failed"
+                    ? "入池重试失败"
+                    : "任务通知";
           showToast(title, item.message || "", item.level || "info");
         }
       }
@@ -1076,13 +1193,37 @@
       items.forEach((item) => {
         if (item.id != null) state.seenAuditIds[String(item.id)] = true;
       });
-      renderAuditList(items);
+      const f = state.auditFilters || {};
+      const parts = [];
+      if (f.level) parts.push(`级别 ${f.level}`);
+      if (f.event) parts.push(`事件 ${f.event}`);
+      if (f.task_id) parts.push(`任务 #${f.task_id}`);
+      if (f.q) parts.push(`关键词 “${f.q}”`);
+      renderAuditList(items, { metaSuffix: parts.join(" · ") });
     } catch (error) {
       if (auditMetaEl) auditMetaEl.textContent = `审计加载失败: ${error.message}`;
       if (!silent) {
         // keep quiet on background failures
       }
     }
+  }
+
+  function scheduleAuditRefresh() {
+    if (state.auditFilterTimer) {
+      window.clearTimeout(state.auditFilterTimer);
+    }
+    state.auditFilterTimer = window.setTimeout(() => {
+      refreshAudit({ silent: true });
+    }, 250);
+  }
+
+  function resetAuditFilters() {
+    state.auditFilters = { level: "", event: "", task_id: "", q: "" };
+    if (auditLevelFilterEl) auditLevelFilterEl.value = "";
+    if (auditEventFilterEl) auditEventFilterEl.value = "";
+    if (auditTaskFilterEl) auditTaskFilterEl.value = "";
+    if (auditQueryFilterEl) auditQueryFilterEl.value = "";
+    refreshAudit({ silent: true });
   }
 
   function connectSse() {
@@ -1587,6 +1728,44 @@ stopBtnEl.addEventListener("click", async () => {
   }
   if (refreshAuditBtnEl) {
     refreshAuditBtnEl.addEventListener("click", () => refreshAudit({ silent: false }));
+  }
+  if (auditLevelFilterEl) {
+    auditLevelFilterEl.addEventListener("change", () => {
+      readAuditFiltersFromUi();
+      refreshAudit({ silent: true });
+    });
+  }
+  if (auditEventFilterEl) {
+    auditEventFilterEl.addEventListener("change", () => {
+      readAuditFiltersFromUi();
+      refreshAudit({ silent: true });
+    });
+  }
+  if (auditTaskFilterEl) {
+    auditTaskFilterEl.addEventListener("input", () => {
+      readAuditFiltersFromUi();
+      scheduleAuditRefresh();
+    });
+    auditTaskFilterEl.addEventListener("change", () => {
+      readAuditFiltersFromUi();
+      refreshAudit({ silent: true });
+    });
+  }
+  if (auditQueryFilterEl) {
+    auditQueryFilterEl.addEventListener("input", () => {
+      readAuditFiltersFromUi();
+      scheduleAuditRefresh();
+    });
+    auditQueryFilterEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        readAuditFiltersFromUi();
+        refreshAudit({ silent: true });
+      }
+    });
+  }
+  if (auditFilterResetBtnEl) {
+    auditFilterResetBtnEl.addEventListener("click", resetAuditFilters);
   }
   if (poolTrendRangesEl) {
     poolTrendRangesEl.addEventListener("click", (event) => {
